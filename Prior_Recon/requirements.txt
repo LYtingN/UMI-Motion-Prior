@@ -1,0 +1,29 @@
+# Prior-Recon — Python dependencies
+#
+# Reference environment (verified): Python 3.8, CUDA 12.1.
+# Newer versions generally work; these are the pins the checkpoint was
+# trained and validated with.
+
+# --- Core (required for training, reconstruction, and planning) ---
+torch==2.4.1            # +cu121 build recommended for GPU
+numpy==1.24.4
+scipy==1.10.1
+mujoco==3.2.3           # forward kinematics + viewer
+pyyaml                  # YAML config loading
+pandas                  # parquet dataset ingestion
+pyarrow                 # parquet backend for pandas
+
+# --- Visualization (optional; needed for the on-screen MuJoCo viewer) ---
+# A display / X server is required. Headless runs (--no-viewer) do not need this.
+mujoco-python-viewer
+
+# --- Training logging (optional) ---
+tensorboard             # torch.utils.tensorboard; skipped gracefully if absent
+# wandb                 # uncomment to enable Weights & Biases logging
+
+# --- Sonic bridge, real (non-mock) ZMQ path only (optional) ---
+# pyzmq                 # streams the reference to the sonic controller
+# msgpack               # decodes sonic 'g1_debug' state feedback
+
+# --- TextOp tracker bridge only (optional) ---
+# onnxruntime==1.19.2   # runs the pretrained ONNX tracking policy in-process

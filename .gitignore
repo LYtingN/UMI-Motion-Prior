@@ -1,0 +1,62 @@
+# Data & checkpoints
+data/
+checkpoints/
+outputs/
+model_test/
+/dataset/
+Prior_Recon/Masked_Flow/emft_best.pt
+next.md
+
+# Third-party submodules / vendored libraries
+GR00T-WholeBodyControl/
+ardy/
+universal_manipulation_interface/
+/data_test/
+Prior_Recon/Masked_Flow/assets/
+# Upstream pyroki clone (nested repo). The bits we use are vendored under
+# Prior_Recon/Masked_Flow/visual/IK/_pyroki/ -- this clone is a
+# reference only and must not be committed into this repo.
+/pyroki/
+
+model_deploy/
+# Claude Code
+.claude/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Environments
+.venv/
+venv/
+env/
+.conda/
+*.egg-link
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Misc
+*.log
+*.tmp
+.DS_Store
+.idea/
+.vscode/
+.codegraph/
+*.parquet
+.omo/
+
+# Experiment logs
+logs/

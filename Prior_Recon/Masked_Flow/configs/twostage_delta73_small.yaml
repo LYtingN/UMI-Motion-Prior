@@ -1,0 +1,205 @@
+# Two-stage (root -> body) cascade on delta73 + lookahead.
+#
+# Body stage (all top-level / loss fields) mirrors delta73_look_small.yaml;
+# the extra `root_stage` block configures the stage-1 root model. Load with
+# configs/load_config_two_stage.two_stage_config_from_yaml (the single-stage
+# loader will NOT read root_stage), train with scripts/train_two_stage.py.
+#
+# Cascade contract (sequential at the segment level): stage 1 first rolls out
+# the root+contact channels ([0:11] + [69:73]) over the WHOLE 34-frame segment
+# (4x8 primitive rollout); stage 2 then generates the body per primitive
+# seeing the FULL segment root -- the in-window 10 frames via pinned root
+# columns (obs_mask), the remaining frames via root preview tokens
+# (root_look_stride below). Stage-1 outputs are detached before stage 2.
+#
+# DATA: 30fps v3 regenerated features only (50fps data deployed at 30fps is
+# the known 0.6x slow-motion confound; do not mix).
+
+skeleton:
+  name: g1_delta69
+  n_total_joints: 69
+  upper_body_global_indices: null
+  wrist_local_indices: []
+
+# ── Motion representation ─────────────────────────────────────────────────────
+motion:
+  joint_repr: dof
+  seq_len: 10
+  fps: 30
+  window_stride: 8
+  normalize: false
+
+# ── Primitive rollout ─────────────────────────────────────────────────────────
+primitive:
+  enabled: true
+  history_len: 2
+  future_len: 8
+  num_primitives: 4
+  segment_stride: 8
+  rollout_start_ratio: 0.012
+  rollout_end_ratio: 0.09
+  rollout_max_prob: 1.0
+  val_rollout: true
+
+# ── Training ──────────────────────────────────────────────────────────────────
+# Same schedule as delta73_look_small; the root stage adds ~5M params on top
+# of the 37.7M body model, so the memory budget is essentially unchanged.
+train:
+  lr: 4.9e-4
+  weight_decay: 1.0e-4
+  batch_size: 6144
+  max_microbatch_size: 6144
+  num_workers: 4
+  gpu_memory_fraction: 0.85
+  n_epochs: 250
+  grad_clip: 1.0
+  ema_decay: 0.999
+  warmup_epochs: 3
+  val_split: 0.1
+  log_interval: 50
+  ckpt_dir: checkpoints/Prior_Recon/masked_flow_twostage_delta73_small
+
+# ── Body-stage architecture (identical to delta73_look_small) ─────────────────
+hidden_dim: 512
+n_layers: 12
+n_heads: 8
+dropout: 0.1
+time_emb_dim: 256
+ode_steps: 32
+
+# ── EE conditioning (shared by both stages) ───────────────────────────────────
+use_ee_pos: true
+use_ee_height_anchor: true
+use_ee_vel: true
+ee_state_dim: 0
+# Layer C (footfix-aligned): absolute initial-hand-orientation anchor, +12 dims
+# to s_ee (both stages' condition encoders size from ee_feat_dim automatically).
+use_ee_anchor: true
+
+# ── Absolute root channels (drift fix) ────────────────────────────────────────
+abs_root_channels: true
+
+# ── EE hand-tracking fixes (loss-side only; ported from delta73_footfix) ──────
+# Step 1: rebase ee_cond to the GT SEGMENT frame-0 hand pose (one stable anchor
+# for all primitives) so the strong ee_cond weights supervise the ABSOLUTE
+# in-segment hand pose. In stage 2 the pred hand FK = stage-1 root + body arm
+# chain, so this also teaches the arms to hit absolute hand targets GIVEN the
+# predicted root. Requires abs_root_channels.
+ee_cond_segment_anchor: true
+# Step 2: geometry/FK losses once on the four body primitives stitched back
+# into the full 34-frame segment (per-primitive calls skip them). The stitched
+# root columns are the single stage-1 segment root, so this adds the only
+# cross-seam gradient path for the BODY dofs (root seams are stage 1's
+# business; its parts enter the body pass detached).
+segment_geometry_loss: true
+
+# ── Layer B: history-mismatch augmentation (footfix-aligned) ──────────────────
+# Constant pose offset into the pinned history so the model learns to converge
+# from a mismatched (standing / real executed-state) seed. Body pass uses the
+# full perturbation; the root pass applies the tilt part (_perturb_root_history).
+history_perturb_prob: 0.5
+history_perturb_joint_std: 0.05
+history_perturb_tilt_std: 0.03
+
+# ── Flow matching ─────────────────────────────────────────────────────────────
+use_logit_normal_t: true
+logit_normal_sigma: 1.0
+# footfix-aligned: per_frame is an unresolved regression suspect on the
+# single-stage line; keep both lines on the same setting for comparability.
+# NOTE this makes rolling sampling unavailable (sample(rolling>0) raises on
+# shared-t checkpoints by design).
+per_frame_noise: false
+
+# ── Body-stage loss ───────────────────────────────────────────────────────────
+# Root-only terms are removed relative to delta73_look_small: the root columns
+# of the body prediction are pinned to stage 1's DETACHED output, so any loss
+# that only reads root channels (drift_yaw/drift_xy, root_consistency,
+# root_vel, root_height) is gradient-free here -- those live in root_stage.loss
+# instead. FK terms stay: with the root pinned, their gradient flows into the
+# leg/arm dof channels only, i.e. "solve the body given the predicted root".
+loss:
+  flow_weight: 1.0
+  recon_weight: 0.15
+  velocity_weight: 0.15
+  leg_joint_weight: 1.0       # footfix-aligned
+  root_weight: 1.5            # footfix-aligned; root channels are masked in stage 2 -> inert
+  accel_weight: 0.05          # footfix-aligned
+  contact_weight: 0.0         # footfix-aligned (regularizer dropped there)
+  body_trans_weight: 0.05
+  body_rot_weight: 0.01
+  ee_pos_weight: 0.2
+  ee_rot_weight: 0.05
+  ee_cond_pos_weight: 2.0
+  ee_cond_rot_weight: 0.2
+  # Layer C anchor loss (footfix-aligned; requires use_ee_anchor).
+  anchor_rot_weight: 0.2
+  dof_pos_weight: 0.03
+  # Pruned (loss de-clutter, 07-17): the shared velocity loss already covers
+  # the dof channels; at 1e-5 this term was dead weight.
+  dof_vel_weight: 0.0
+  # Foot suite footfix-aligned (consolidated sole-corner form): the ankle-origin
+  # terms are geometrically implied by the 4 sole corners, weights folded in
+  # (see delta73_footfix.yaml for the arithmetic). In stage 2 the root is
+  # pinned, so these press the LEG dofs to track the stage-1 root without
+  # skating -- the leg<->root coupling now runs across the stage boundary.
+  foot_contact_weight: 0.0
+  foot_skate_weight: 0.0
+  foot_rot_weight: 0.0
+  foot_sole_pos_weight: 0.8
+  foot_sole_skate_weight: 0.1
+  drift_yaw_weight: 0.0       # root detached in stage 2 -> gradient-free; implemented in root_stage.loss below
+  drift_xy_weight: 0.0
+  root_curriculum_start_mult: 1.0   # early root boost is stage 1's business now
+  root_curriculum_end_ratio: 0.0
+  ee_curriculum_start_ratio: 0.012
+  ee_curriculum_end_ratio: 0.09
+  # footfix-aligned: sole terms enter AFTER the EE ramp completes (capacity race).
+  skate_curriculum_start_ratio: 0.09
+  skate_curriculum_end_ratio: 0.18
+  # Pruned: zero-target L1 prior pulling against the GT-target velocity loss.
+  # Cross-seam continuity is covered by the stitched-segment terms instead.
+  smooth_weight: 0.0
+  # Cross-seam second-order continuity on the stitched body segment (requires
+  # segment_geometry_loss). Root columns are observed (stage-1 pinned) so this
+  # presses the body dof channels only.
+  seam_accel_weight: 0.05
+  quantize_rot_weight: 0.0
+  quantize_trans_weight: 0.0
+
+# ── EE lookahead (shared by both stages) ──────────────────────────────────────
+lookahead_len: 16
+lookahead_stride: 2
+
+# ── Root preview for the body stage ───────────────────────────────────────────
+# Stage-1 root beyond the current 10-frame window (segment_len - primitive_len
+# = 24 frames), downsampled to 12 preview tokens. Together with the in-window
+# pinned root columns the body stage sees all 34 frames of root.
+root_look_stride: 2
+
+# ── Stage-1 root model ────────────────────────────────────────────────────────
+# 15-dim feature space (root+contact), ~5M params. All channels are root
+# channels, so flow/recon supervise everything without weight balancing; the
+# fps-scaled terms (root_consistency, root_vel) keep small weights (the x900
+# squared-magnitude lesson from the single-stage runs).
+root_stage:
+  hidden_dim: 256
+  n_layers: 6
+  n_heads: 8
+  dropout: 0.1
+  time_emb_dim: 128
+  transformer_ffn_mult: 4
+  out_proj_hidden_mult: 2
+  stage_weight: 1.0
+  loss:
+    flow_weight: 1.0
+    recon_weight: 0.25
+    velocity_weight: 0.15
+    contact_pred_weight: 0.5
+    root_consistency_weight: 0.05
+    root_vel_weight: 0.02
+    root_height_weight: 0.3
+    # Full-horizon drift anchors on the last frame's abs channels -- the
+    # single-stage drift terms' counterparts (gradient-free in the body stage,
+    # so they live here). Weights mirror delta73_footfix.
+    drift_yaw_weight: 0.05
+    drift_xy_weight: 0.5

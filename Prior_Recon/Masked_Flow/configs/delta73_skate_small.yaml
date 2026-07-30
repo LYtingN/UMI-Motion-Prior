@@ -1,0 +1,142 @@
+skeleton:
+  name: g1_delta69
+  n_total_joints: 69
+  upper_body_global_indices: null
+  wrist_local_indices: []
+
+# ── Motion representation ─────────────────────────────────────────────────────
+motion:
+  joint_repr: dof
+  seq_len: 10
+  fps: 30
+  window_stride: 8
+  normalize: false
+
+# ── Primitive rollout ─────────────────────────────────────────────────────────
+primitive:
+  enabled: true
+  history_len: 2
+  future_len: 8
+  num_primitives: 4
+  segment_stride: 8
+  # Curriculum tied to a 150-epoch timeline while total training is 250 epochs:
+  # ratios scaled by 150/250 = 0.6 so ramps finish at the SAME absolute epoch.
+  rollout_start_ratio: 0.012   # 0.02 * 0.6 -> epoch 3 (of 250)
+  rollout_end_ratio: 0.09      # 0.15 * 0.6 -> epoch 22.5 (of 250)
+  rollout_max_prob: 1.0
+  val_rollout: true
+
+# ── Training ──────────────────────────────────────────────────────────────────
+train:
+  lr: 5.66e-4         # sqrt-scaled for 8192 global batch (4.0e-4 @ 4096 -> x sqrt(8192/4096))
+  weight_decay: 1.0e-4
+  # Global batch. On 8-GPU DDP this splits to 1024/rank — in the GEMM
+  # sweet spot (per-rank 512->1024 gave +58% throughput on this 39M model).
+  # Must be divisible by GPU count: 8192 = 8 x 1024.
+  batch_size: 8192
+  max_microbatch_size: 8192 # OOM guard auto-halves if needed
+  num_workers: 3         # per-rank; 8 GPUs x 3 = 24 workers
+  gpu_memory_fraction: 0.85
+  n_epochs: 250
+  grad_clip: 1.0
+  ema_decay: 0.999
+  warmup_epochs: 3          # absolute epochs (not step-ratio); ~1.2% of 250
+  val_split: 0.1
+  log_interval: 50
+  ckpt_dir: checkpoints/Prior_Recon/masked_flow_delta73_skate_small
+
+# ── Model architecture ────────────────────────────────────────────────────────
+hidden_dim: 512
+n_layers: 12
+n_heads: 8
+dropout: 0.1
+time_emb_dim: 256
+ode_steps: 32
+
+# ── EE conditioning ───────────────────────────────────────────────────────────
+use_ee_pos: true
+use_ee_height_anchor: true
+use_ee_vel: true
+ee_state_dim: 0
+
+# ── Absolute root channels (drift fix) ────────────────────────────────────────
+abs_root_channels: true
+
+# ── Flow matching ─────────────────────────────────────────────────────────────
+use_logit_normal_t: true
+logit_normal_sigma: 1.0
+# Off: the current sampler sweeps all generated frames at one shared t and
+# pins observed frames to t=1, so per-frame noise levels are trained but never
+# exploited (pure training cost until a rolling/noisy-history sampler exists).
+# NOTE: hypothesis from the 2026-07 regression diagnosis, not an ablation
+# result. Also kept off here for single-variable comparability.
+per_frame_noise: false
+
+# ── Loss weights ──────────────────────────────────────────────────────────────
+# Anti-skate + anti-jitter revision of delta73_look_small (see loss comments):
+# * foot_skate: stance foot world velocity (FK) must match GT — couples root
+#   motion to leg articulation, the direct anti-skate gradient.
+# * contact_weight -> 0: the old regularizer pushed stance-leg joint VELOCITY
+#   to zero, contradicting real stance (joints rotate as the body vaults over
+#   the planted foot) and actively encouraging skating.
+# * contact_pred: sharpen the contact channels for foot-lock post-processing.
+# * root_consistency / root_vel: kill the abs-channel per-frame read jitter.
+# * leg_joint_weight back to 1.0 / root_weight 2 -> 1.5: stop trading leg
+#   accuracy for root accuracy.
+#
+# 2026-07 rebalance (first skate run: skating improved, but EE accuracy
+# regressed and the base floated):
+# * foot_skate 0.5 -> 0.05 / root_vel 0.3 -> 0.03: both are m/s-scale MSEs
+#   (per-frame diff * fps, squared -> ~900x the metre-scale terms), so 0.5/0.3
+#   let them hijack the gradient budget from the EE losses.
+# * root_height (new, 0.5): absolute per-frame anchor for the height channel.
+#   root_vel pins only its RATE (~0 in walking) and the FK foot terms are
+#   invariant to root-up/legs-extend, so height's dc level drifted -> floating.
+# * skate curriculum: the FK foot terms (foot_skate + foot_contact) enter
+#   AFTER the EE curriculum completes instead of winning the early capacity
+#   race; foot_skate also no longer takes the early root_mult boost.
+loss:
+  flow_weight: 1.0
+  recon_weight: 0.15
+  velocity_weight: 0.15
+  leg_joint_weight: 1.0
+  root_weight: 1.5
+  accel_weight: 0.05
+  contact_weight: 0.0
+  body_trans_weight: 0.05
+  body_rot_weight: 0.01
+  ee_pos_weight: 0.2
+  ee_rot_weight: 0.05
+  ee_cond_pos_weight: 2.0
+  ee_cond_rot_weight: 0.2
+  dof_pos_weight: 0.03
+  dof_vel_weight: 1e-5
+  foot_contact_weight: 0.5
+  foot_skate_weight: 0.05
+  contact_pred_weight: 0.5
+  # 0.5 -> 0.05: same m/s-scale MSE as foot_skate/root_vel (~900x metre terms)
+  # but was missed in the /10 rebalance. Observed run: 71% of total loss at
+  # epoch 1, still 74-82% at epoch 4 with the EE ramp already live, and the
+  # rollout curriculum (worse dual-encoding consistency on self-fed frames)
+  # pushes against natural decay. Self-consistency has no GT term opposing it,
+  # so it still converges at low weight; fused decode backstops at inference.
+  root_consistency_weight: 0.05
+  root_vel_weight: 0.03
+  root_height_weight: 0.5
+  drift_yaw_weight: 0.05
+  drift_xy_weight: 0.5
+  # Curriculum ratios scaled by 150/250 = 0.6 so ramps finish at the same
+  # absolute epoch as the original 150-epoch schedule.
+  root_curriculum_start_mult: 1.5
+  root_curriculum_end_ratio: 0.06   # 0.10 * 0.6 -> epoch 15 (of 250)
+  ee_curriculum_start_ratio: 0.012  # 0.02 * 0.6 -> epoch 3 (of 250)
+  ee_curriculum_end_ratio: 0.09     # 0.15 * 0.6 -> epoch 22.5 (of 250)
+  skate_curriculum_start_ratio: 0.09  # 0.15 * 0.6 -> epoch 22.5 (EE ramp done)
+  skate_curriculum_end_ratio: 0.18    # 0.30 * 0.6 -> epoch 45 (of 250)
+  smooth_weight: 0.001
+  quantize_rot_weight: 0.0
+  quantize_trans_weight: 0.0
+
+# ── EE lookahead ──────────────────────────────────────────────────────────────
+lookahead_len: 16
+lookahead_stride: 2
