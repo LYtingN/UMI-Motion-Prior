@@ -249,8 +249,15 @@ class MaskedFlowTransformerTrainer:
             )
 
         interrupted = threading.Event()
-        orig_sigint = signal.getsignal(signal.SIGINT)
-        orig_sigterm = signal.getsignal(signal.SIGTERM)
+        # signal.signal() only works in the main thread of the main interpreter.
+        # Under torchrun each rank's training code runs in the main thread, but
+        # Ray Train (torch_trainer.train) runs the training fn in a worker sub-
+        # thread, where registering handlers raises ValueError. Only install the
+        # graceful-exit handlers when we're actually on the main thread; otherwise
+        # skip them (the launcher handles termination) so training still runs.
+        can_handle_signals = threading.current_thread() is threading.main_thread()
+        orig_sigint = signal.getsignal(signal.SIGINT) if can_handle_signals else None
+        orig_sigterm = signal.getsignal(signal.SIGTERM) if can_handle_signals else None
 
         def _graceful_exit(signum, frame) -> None:
             if not interrupted.is_set():
@@ -265,8 +272,9 @@ class MaskedFlowTransformerTrainer:
             signal.signal(signal.SIGTERM, orig_sigterm)
             os.kill(os.getpid(), signum)
 
-        signal.signal(signal.SIGINT, _graceful_exit)
-        signal.signal(signal.SIGTERM, _graceful_exit)
+        if can_handle_signals:
+            signal.signal(signal.SIGINT, _graceful_exit)
+            signal.signal(signal.SIGTERM, _graceful_exit)
 
         try:
             for epoch in range(self.start_epoch, self.cfg.train.n_epochs):
@@ -312,8 +320,9 @@ class MaskedFlowTransformerTrainer:
             if not interrupted.is_set() and self.is_main:
                 self._save("final", epoch=self.cfg.train.n_epochs)
         finally:
-            signal.signal(signal.SIGINT, orig_sigint)
-            signal.signal(signal.SIGTERM, orig_sigterm)
+            if can_handle_signals:
+                signal.signal(signal.SIGINT, orig_sigint)
+                signal.signal(signal.SIGTERM, orig_sigterm)
             if self._tb_writer is not None:
                 try:
                     self._tb_writer.close()
