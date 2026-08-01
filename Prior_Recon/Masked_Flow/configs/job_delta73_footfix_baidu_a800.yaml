@@ -34,7 +34,7 @@ tasks:
     args:
       # 路径相对 cwd(=仓库根)解析
       - "--config"
-      - "Prior_Recon/Masked_Flow/configs/delta73_footfix.yaml"
+      - "Prior_Recon/Masked_Flow/configs/delta73_dit_footfix.yaml"
       # delta 特征根:eason.nai 已失效,正确路径在 eason.er(23962 个 npz)
       - "--feat-root"
       - "/data/nas_ray/home/eason.er/train_delta_feat_v3"
