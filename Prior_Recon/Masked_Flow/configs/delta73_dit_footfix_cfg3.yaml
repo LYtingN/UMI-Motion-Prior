@@ -33,7 +33,7 @@ train:
   max_microbatch_size: 8192
   num_workers: 2
   gpu_memory_fraction: 0.85
-  n_epochs: 300
+  n_epochs: 500
   grad_clip: 1.0
   ema_decay: 0.999
   warmup_epochs: 5

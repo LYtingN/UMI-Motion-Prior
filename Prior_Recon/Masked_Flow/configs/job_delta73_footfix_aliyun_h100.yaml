@@ -1,6 +1,6 @@
 config_version: 1
-cluster: baidu_a800
-num_gpus: 16
+cluster: aliyun_h100
+num_gpus: 32
 image: "ai-base:ubuntu22.04-sim5.0.0-lab_MD2.2.1-ray2.52.0-cu12.8_devel-v1.4"
 
 git_workspace:
@@ -25,7 +25,7 @@ log_folder: "logs"
 tasks:
   - name: masked_flow_delta73_footfix
     type: torch_trainer.train
-    run_name: masked_flow_delta73_footfix_baidu_a800
+    run_name: masked_flow_delta73_footfix_aliyun_h100
     # 由平台启动器托管分布式(自动注入 RANK/WORLD_SIZE/LOCAL_RANK/MASTER_ADDR
     # 铺满全部 16 卡);trainer 用 utils/distributed.setup_distributed() 直接读这些
     # env 变量、init_process_group(env://)、手动 all_reduce 梯度(非 DDP wrapper、
@@ -34,7 +34,7 @@ tasks:
     args:
       # 路径相对 cwd(=仓库根)解析
       - "--config"
-      - "Prior_Recon/Masked_Flow/configs/delta73_dit_footfix.yaml"
+      - "Prior_Recon/Masked_Flow/configs/delta73_dit_footfix_cfg3.yaml"
       # delta 特征根:eason.nai 已失效,正确路径在 eason.er(23962 个 npz)
       - "--feat-root"
       - "/data/nas_ray/home/eason.er/train_delta_feat_v3"
@@ -44,9 +44,9 @@ tasks:
       - "0.85"
       # ckpt 落 NAS 持久化(不落 pod 内易失的仓库根);传 --ckpt-dir 则跳过日期后缀
       - "--ckpt-dir"
-      - "/data/nas_ray/home/eason.er/checkpoints/Prior_Recon/masked_flow_delta73_footfix_baidu_a800"
+      - "/data/nas_ray/home/eason.er/checkpoints/Prior_Recon/masked_flow_delta73_footfix_aliyun_h100"
       # config.train.batch_size=8192 是【全局】batch;dataloader 按 world_size 切分,
-      # 8192/16=512/卡(必须整除,16 整除 8192 ✓),不覆盖即保持全局 batch 不变。
+      # 8192/32=256/卡(必须整除,32 整除 8192 ✓),不覆盖即保持全局 batch 不变。
 
 os_env_vars:
   GH_PAT: "REPLACE_WITH_GITHUB_PAT"
@@ -54,6 +54,7 @@ os_env_vars:
   # 每 worker 的 in-RAM 源文件 LRU 缓存上限。数据集 23962 个 DEFLATE 压缩 npz,
   # 随机访问下小缓存会每 epoch 反复解压 -> epoch 时间翻倍(IO-bound,非 GPU-bound)。
   # 保持满缓存(100000 >> 23962)使 epoch 2+ 零解压。
-  # A800 节点内存上限 960GB(NODE_RESOURCE_PROFILES),远比 4090 节点宽裕;
-  # 内存占用 ~ 16 卡 x num_workers(=2) x ~9GB ≈ 288GB,安全。
+  # H100 节点内存宽裕;缓存为每-worker,内存占用 ~ 单节点GPU数 x num_workers(=2)
+  # x ~9GB。注意 32 卡若同节点则峰值更高(如 8 卡/节点 x 2 x 9GB ≈ 144GB/节点),
+  # 按每-节点内存核算而非总卡数;当前节点内存下安全。
   FEAT_CACHE_MAX_FILES: "100000"
