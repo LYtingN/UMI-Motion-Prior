@@ -218,6 +218,9 @@ class EEMaskedFlowTransformer(nn.Module):
                     ffn_mult=ffn_mult,
                     dropout=cfg.dropout,
                     n_layers=cfg.n_layers,
+                    cross_attention_gate_init=float(
+                        getattr(cfg, "dit_cross_attention_gate_init", 0.1)
+                    ),
                 )
             )
         else:

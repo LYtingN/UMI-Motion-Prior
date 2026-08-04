@@ -39,7 +39,7 @@ train:
   warmup_epochs: 3
   val_split: 0.1
   log_interval: 50
-  ckpt_dir: checkpoints/Prior_Recon/masked_flow_delta73_dit_footfix
+  ckpt_dir: checkpoints/Prior_Recon/masked_flow_delta73_dit_cross_footfix
 
 # ── Model architecture ────────────────────────────────────────────────────────
 hidden_dim: 512
@@ -50,6 +50,7 @@ time_emb_dim: 256
 ode_steps: 32
 transformer_ffn_mult: 4
 temporal_backbone: dit
+dit_cross_attention_gate_init: 0.1
 
 # ── EE conditioning ───────────────────────────────────────────────────────────
 use_ee_pos: true

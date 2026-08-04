@@ -3,7 +3,13 @@ from __future__ import annotations
 from typing import NamedTuple
 
 import torch
-import torch.nn as nn
+from torch import nn
+
+from Prior_Recon.Masked_Flow.model.temporal_dit_cross_attention import (
+    AttentionModulation,
+    NormalizedTemporalCrossAttention,
+    TemporalCrossAttentionSpec,
+)
 
 
 class TemporalDiTSpec(NamedTuple):
@@ -12,13 +18,14 @@ class TemporalDiTSpec(NamedTuple):
     ffn_mult: int
     dropout: float
     n_layers: int
+    cross_attention_gate_init: float = 0.1
 
 
 class TemporalDiTConfigError(ValueError):
     def __init__(
         self,
         field: str,
-        actual: tuple[int, ...] | float | int,
+        actual: tuple[int, ...] | float,
     ) -> None:
         self.field = field
         self.actual = actual
@@ -57,6 +64,14 @@ class TemporalDiTBlock(nn.Module):
             dropout=spec.dropout,
             batch_first=True,
         )
+        self.context_attention = NormalizedTemporalCrossAttention(
+            TemporalCrossAttentionSpec(
+                hidden_dim=spec.hidden_dim,
+                n_heads=spec.n_heads,
+                dropout=spec.dropout,
+                gate_init=spec.cross_attention_gate_init,
+            )
+        )
         self.norm_mlp = nn.LayerNorm(
             spec.hidden_dim,
             elementwise_affine=False,
@@ -94,14 +109,21 @@ class TemporalDiTBlock(nn.Module):
             attention_shift,
             attention_scale,
         )
-        attention_input = torch.cat((context_tokens, body_query), dim=1)
         attention_output, _ = self.attention(
             body_query,
-            attention_input,
-            attention_input,
+            body_query,
+            body_query,
             need_weights=False,
         )
         body_tokens = body_tokens + _gate(attention_output, attention_gate)
+        body_tokens = self.context_attention(
+            body_tokens,
+            context_tokens,
+            AttentionModulation(
+                shift=attention_shift,
+                scale=attention_scale,
+            ),
+        )
         mlp_input = _modulate(
             self.norm_mlp(body_tokens),
             mlp_shift,
@@ -125,6 +147,11 @@ class TemporalDiTTransformer(nn.Module):
             raise TemporalDiTConfigError("n_layers", spec.n_layers)
         if spec.hidden_dim % spec.n_heads != 0:
             raise TemporalDiTConfigError("n_heads", spec.n_heads)
+        if not 0.0 < spec.cross_attention_gate_init <= 1.0:
+            raise TemporalDiTConfigError(
+                "cross_attention_gate_init",
+                spec.cross_attention_gate_init,
+            )
         self.hidden_dim = spec.hidden_dim
         self.blocks = nn.ModuleList(
             TemporalDiTBlock(spec) for _ in range(spec.n_layers)

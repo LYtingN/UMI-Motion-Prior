@@ -235,6 +235,7 @@ class EEMaskedFlowConfig:
     transformer_ffn_mult: int = 4
     out_proj_hidden_mult: int = 2
     temporal_backbone: str = "flat"
+    dit_cross_attention_gate_init: float = 0.1
     hierarchy_fine_layers: int = 4
     hierarchy_coarse_layers: int = 4
     hierarchy_refine_layers: int = 4

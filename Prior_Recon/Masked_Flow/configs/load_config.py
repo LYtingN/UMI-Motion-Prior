@@ -42,7 +42,8 @@ def _build_config(d: dict[str, Any]) -> EEMaskedFlowConfig:
     top_keys = {
         "hidden_dim", "n_layers", "n_heads", "dropout", "time_emb_dim",
         "ode_steps", "transformer_ffn_mult", "out_proj_hidden_mult",
-        "temporal_backbone", "hierarchy_fine_layers",
+        "temporal_backbone", "dit_cross_attention_gate_init",
+        "hierarchy_fine_layers",
         "hierarchy_coarse_layers", "hierarchy_refine_layers",
         "hierarchy_downsample_factor",
         "use_ee_pos", "use_ee_height_anchor", "use_ee_vel",
