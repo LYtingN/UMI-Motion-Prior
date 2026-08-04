@@ -23,7 +23,7 @@ py_paths: ["."]
 log_folder: "logs"
 
 tasks:
-  - name: masked_flow_delta73_footfix
+  - name: masked_flow
     type: torch_trainer.train
     run_name: masked_flow_delta73_footfix_aliyun_h100
     # 由平台启动器托管分布式(自动注入 RANK/WORLD_SIZE/LOCAL_RANK/MASTER_ADDR
@@ -34,7 +34,7 @@ tasks:
     args:
       # 路径相对 cwd(=仓库根)解析
       - "--config"
-      - "Prior_Recon/Masked_Flow/configs/delta73_dit_footfix_cfg3.yaml"
+      - "Prior_Recon/Masked_Flow/configs/delta73_dit_footfix.yaml"
       # delta 特征根:eason.nai 已失效,正确路径在 eason.er(23962 个 npz)
       - "--feat-root"
       - "/data/nas_ray/home/eason.er/train_delta_feat_v3"
