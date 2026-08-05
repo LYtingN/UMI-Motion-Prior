@@ -27,13 +27,13 @@ primitive:
 
 # ── Training ──────────────────────────────────────────────────────────────────
 train:
-  lr: 5.66e-4
+  lr: 1.13e-3
   weight_decay: 1.0e-4
-  batch_size: 8192
+  batch_size: 32768
   max_microbatch_size: 8192
   num_workers: 2
   gpu_memory_fraction: 0.85
-  n_epochs: 250
+  n_epochs: 500
   grad_clip: 1.0
   ema_decay: 0.999
   warmup_epochs: 3
