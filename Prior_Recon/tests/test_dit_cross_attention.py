@@ -13,6 +13,9 @@ from Prior_Recon.Masked_Flow.model.masked_flow_transformer import (
     EEMaskedFlowTransformer,
     load_masked_flow_state_dict,
 )
+from Prior_Recon.Masked_Flow.model.two_stage_cascade import (
+    BodyStageTransformer,
+)
 from Prior_Recon.Masked_Flow.model.temporal_dit import (
     N_ADA_LN_CHUNKS,
     TemporalDiTConfigError,
@@ -443,3 +446,67 @@ def test_dit_backbone_drops_the_dead_pre_backbone_norm() -> None:
     assert dit_model.norm is None
     assert flat_model.norm is not None
     assert not any(key.startswith("norm.") for key in dit_model.state_dict())
+
+
+def _cascade_config(**overrides) -> EEMaskedFlowConfig:
+    cfg = _tiny_dit_config(**overrides)
+    cfg.root_look_len = 4
+    cfg.root_look_stride = 2
+    cfg.n_root_look_tokens = 2
+    return cfg
+
+
+@pytest.mark.parametrize("backbone", ["dit", "flat"])
+def test_body_stage_cascade_forward_survives_the_preview_plumbing(backbone: str) -> None:
+    # BodyStageTransformer overrides forward() and re-implements the token
+    # assembly, so every change to _lookahead_tokens / _encode_body_tokens has
+    # to be mirrored there or the cascade breaks with no other test noticing.
+    torch.manual_seed(53)
+    cfg = _cascade_config(temporal_backbone=backbone)
+    model = BodyStageTransformer(cfg, root_dim=6).eval()
+    x_t = torch.randn(2, 4, cfg.n_total_dof)
+    look_valid = torch.tensor([[1.0, 1.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]])
+
+    output = model(
+        x_t,
+        torch.zeros_like(x_t),
+        torch.zeros_like(x_t),
+        torch.randn(2, 4, cfg.ee_feat_dim),
+        torch.full((2,), 0.5),
+        s_ee_look=torch.randn(2, cfg.lookahead_len, cfg.ee_feat_dim),
+        look_valid=look_valid,
+        root_look=torch.randn(2, cfg.root_look_len, 6),
+        root_look_valid=torch.ones(2, cfg.root_look_len),
+    )
+
+    assert output.pred_v.shape == x_t.shape
+    assert torch.isfinite(output.pred_v).all()
+
+
+def test_cascade_root_preview_tokens_are_never_masked_out() -> None:
+    # The root preview is appended AFTER the EE preview, so the EE-sized mask
+    # must be extended -- otherwise it silently masks root tokens (or the
+    # attention rejects the width).
+    torch.manual_seed(59)
+    cfg = _cascade_config()
+    model = BodyStageTransformer(cfg, root_dim=6).eval()
+    # The dit readout is zero-init, so open it or every prediction is 0.
+    torch.nn.init.normal_(model.out_proj.weight, std=0.02)
+    root_look = torch.randn(2, cfg.root_look_len, 6)
+    kwargs = dict(
+        s_ee_look=torch.randn(2, cfg.lookahead_len, cfg.ee_feat_dim),
+        look_valid=torch.zeros(2, cfg.lookahead_len),
+        root_look_valid=torch.ones(2, cfg.root_look_len),
+    )
+    args = (
+        torch.randn(2, 4, cfg.n_total_dof),
+        torch.zeros(2, 4, cfg.n_total_dof),
+        torch.zeros(2, 4, cfg.n_total_dof),
+        torch.randn(2, 4, cfg.ee_feat_dim),
+        torch.full((2,), 0.5),
+    )
+
+    reference = model(*args, root_look=root_look, **kwargs).pred_v
+    changed = model(*args, root_look=root_look + 3.0, **kwargs).pred_v
+
+    assert not torch.equal(reference, changed)

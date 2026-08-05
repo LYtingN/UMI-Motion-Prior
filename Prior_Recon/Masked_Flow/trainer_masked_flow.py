@@ -88,7 +88,7 @@ def build_adamw_param_groups(
 
 def migrate_single_group_optimizer_state(
     model: nn.Module, optimizer: torch.optim.Optimizer, state: dict
-) -> dict:
+) -> dict | None:
     """Re-index a 1-group AdamW state onto the 2-group split.
 
     Checkpoints saved before the decay/no-decay split hold one group whose

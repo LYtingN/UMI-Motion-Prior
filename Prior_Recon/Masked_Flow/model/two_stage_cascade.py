@@ -150,21 +150,48 @@ class BodyStageTransformer(EEMaskedFlowTransformer):
             body_tokens = body_tokens + self._time_tokens(t, batch, seq_len)
         ee_tokens = self.ee_proj(s_ee) + self.ee_pos_emb[:, :seq_len]
         tokens = [ee_tokens]
+        context_key_padding_mask = None
         if self.n_lookahead_tokens > 0:
-            tokens.append(self._lookahead_tokens(s_ee, s_ee_look, look_valid))
-        if self.n_root_look_tokens > 0:
-            tokens.append(
-                self._root_lookahead_tokens(
-                    root_look, root_look_valid, batch, x_t.device, x_t.dtype
-                )
+            look_tokens, look_valid_ds = self._lookahead_tokens(
+                s_ee,
+                s_ee_look,
+                look_valid,
             )
+            tokens.append(look_tokens)
+            if self.mask_invalid_lookahead:
+                context_key_padding_mask = self._context_key_padding_mask(
+                    look_valid_ds,
+                    seq_len,
+                )
+        if self.n_root_look_tokens > 0:
+            root_look_tokens = self._root_lookahead_tokens(
+                root_look, root_look_valid, batch, x_t.device, x_t.dtype
+            )
+            tokens.append(root_look_tokens)
+            if context_key_padding_mask is not None:
+                # The root preview stream is appended AFTER the EE preview, so
+                # the mask built for [window | ee preview] must be extended or
+                # it would misalign with the key set.
+                context_key_padding_mask = torch.cat(
+                    [
+                        context_key_padding_mask,
+                        torch.zeros(
+                            batch,
+                            root_look_tokens.shape[1],
+                            device=context_key_padding_mask.device,
+                            dtype=torch.bool,
+                        ),
+                    ],
+                    dim=1,
+                )
         hidden = self._encode_body_tokens(
             body_tokens,
             torch.cat(tokens, dim=1),
             t,
+            context_key_padding_mask,
         )
 
-        if self.temporal_backbone != "dit":
+        if self.norm is not None:
             hidden = self.norm(hidden)
         pred_v = self.out_proj(hidden) * (1.0 - obs_mask)
 

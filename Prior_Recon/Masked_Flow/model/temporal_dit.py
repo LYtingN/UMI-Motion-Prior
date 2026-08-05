@@ -260,6 +260,16 @@ class TemporalDiTTransformer(nn.Module):
         # An all-masked row makes softmax divide by zero -> NaN for that sample.
         # The caller keeps the per-frame EE tokens unmasked precisely so this
         # cannot happen; fail loudly rather than emit NaN if that ever changes.
+        #
+        # CPU only, on purpose. Reading a predicate off a device tensor forces a
+        # host sync, and this runs on EVERY forward -- ode_steps x num_primitives
+        # times per sampled segment (32 x 4 = 128 for the delta73 configs), each
+        # one draining the queue in the middle of the ODE loop. The invariant is
+        # structural (see _context_key_padding_mask) and is covered by a CPU
+        # test, so the guard pays for itself where it is free and stays out of
+        # the GPU train/deploy path.
+        if context_key_padding_mask.device.type != "cpu":
+            return
         if bool(context_key_padding_mask.all(dim=-1).any()):
             raise TemporalDiTConfigError(
                 "context_key_padding_mask_all_masked",
