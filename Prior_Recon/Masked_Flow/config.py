@@ -235,7 +235,17 @@ class EEMaskedFlowConfig:
     transformer_ffn_mult: int = 4
     out_proj_hidden_mult: int = 2
     temporal_backbone: str = "flat"
-    dit_cross_attention_gate_init: float = 0.1
+    # Initial adaLN gate bias shared by all three dit residual branches
+    # (self-attention, cross-attention, mlp). 0.0 is canonical DiT's
+    # identity-at-init; a small positive value starts the branches "on" so their
+    # weights get gradient before the zero-init output head has fitted a
+    # pointwise map through the ungated input bypass. See TemporalDiTSpec.
+    dit_residual_gate_init: float = 0.1
+    # Drop invalid EE preview tokens from the dit cross-attention key set
+    # instead of tagging them with a learned "invalid" embedding. Only the dit
+    # backbone reads this. Defaults to False so a config that predates the flag
+    # keeps its trained behaviour; new dit runs should set it True.
+    dit_mask_invalid_lookahead: bool = False
     hierarchy_fine_layers: int = 4
     hierarchy_coarse_layers: int = 4
     hierarchy_refine_layers: int = 4

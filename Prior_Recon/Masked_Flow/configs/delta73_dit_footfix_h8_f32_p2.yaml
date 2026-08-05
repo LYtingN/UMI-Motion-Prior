@@ -7,19 +7,19 @@ skeleton:
 # ── Motion representation ─────────────────────────────────────────────────────
 motion:
   joint_repr: dof
-  seq_len: 10
+  seq_len: 40
   fps: 30
-  window_stride: 8
+  window_stride: 32
   normalize: false
 
 # ── Primitive rollout ─────────────────────────────────────────────────────────
 primitive:
   enabled: true
-  history_len: 2
-  future_len: 8
-  num_primitives: 4
+  history_len: 8
+  future_len: 32
+  num_primitives: 2
   segment_unrolls: 2
-  segment_stride: 8
+  segment_stride: 32
   rollout_start_ratio: 0.012
   rollout_end_ratio: 0.09
   rollout_max_prob: 1.0
@@ -39,7 +39,7 @@ train:
   warmup_epochs: 3
   val_split: 0.1
   log_interval: 50
-  ckpt_dir: checkpoints/Prior_Recon/masked_flow_delta73_dit_cross_footfix
+  ckpt_dir: checkpoints/Prior_Recon/masked_flow_delta73_dit_cross_footfix_h8_f32_p2
 
 # ── Model architecture ────────────────────────────────────────────────────────
 hidden_dim: 512
@@ -120,5 +120,5 @@ loss:
   quantize_rot_weight: 0.0
   quantize_trans_weight: 0.0
 
-lookahead_len: 16
-lookahead_stride: 2
+lookahead_len: 32
+lookahead_stride: 4

@@ -12,6 +12,7 @@ from Prior_Recon.Masked_Flow.loss.foot_skate import (
     project_contact_probability,
 )
 from Prior_Recon.Masked_Flow.model.temporal_dit import (
+    N_ADA_LN_CHUNKS,
     TemporalDiTSpec,
     TemporalDiTTransformer,
 )
@@ -155,23 +156,58 @@ class EEMaskedFlowTransformer(nn.Module):
             nn.Linear(hidden_dim, hidden_dim),
         )
 
-        # EE lookahead preview tokens: same feature format and projection as
-        # the window condition, distinguished by their own positional slots.
+        # EE lookahead preview tokens: same feature format as the window
+        # condition but a SEPARATE projection, not a shared one.
+        #
+        # Sharing ee_proj put the preview tokens and the per-frame window tokens
+        # in the same output subspace, distinguishable only by their positional
+        # tables -- and the cross-attention's LayerNorm over the concatenated
+        # context then removed much of what was left. Softmax over one merged key
+        # set can only return a convex blend of "where the hands are now" and
+        # "where they are heading", so the two responses ended up
+        # anti-correlated (measured on emft_ep0355_dit0805: coherently shifting
+        # both hands 5cm moved the prediction 0.0107 RMS, LESS than shifting the
+        # window alone at 0.0207). A separate projection lets the model place
+        # the two token kinds in different subspaces, which normalization cannot
+        # collapse.
         self.lookahead_len = int(getattr(cfg, "lookahead_len", 0))
         self.lookahead_stride = max(int(getattr(cfg, "lookahead_stride", 1)), 1)
         n_look = getattr(cfg, "n_lookahead_tokens", 0)
         if self.lookahead_len > 0 and not n_look:
             n_look = (self.lookahead_len + self.lookahead_stride - 1) // self.lookahead_stride
         self.n_lookahead_tokens = int(n_look) if self.lookahead_len > 0 else 0
+        # Invalid preview tokens (clip end / randomly truncated horizon) are
+        # dropped from the cross-attention key set instead of being marked with
+        # a learned embedding. Marking left fake hold-still content attendable;
+        # masking removes it, and look_pos_emb still tells the model WHICH
+        # preview slots survived, so the horizon length stays observable.
+        #
+        # Only the dit backbone consumes the mask (the flat/hierarchical
+        # backbones fold the context into one self-attention sequence and have
+        # no key_padding_mask plumbing), so the marker path is kept for them.
+        # False also reproduces every pre-mask checkpoint bit-for-bit; the
+        # loader pins it per checkpoint so a stored model never silently
+        # switches convention.
+        self.mask_invalid_lookahead = (
+            bool(getattr(cfg, "dit_mask_invalid_lookahead", False))
+            and str(getattr(cfg, "temporal_backbone", "flat")) == "dit"
+        )
         if self.n_lookahead_tokens > 0:
+            self.look_proj = nn.Sequential(
+                nn.Linear(ee_dim, hidden_dim),
+                nn.SiLU(),
+                nn.Linear(hidden_dim, hidden_dim),
+            )
             self.look_pos_emb = nn.Parameter(
                 torch.zeros(1, self.n_lookahead_tokens, hidden_dim)
             )
             nn.init.trunc_normal_(self.look_pos_emb, std=0.02)
-            # Added to tokens whose validity is 0 (padding / truncated preview).
-            # Zero-init: an all-invalid preview starts out indistinguishable
-            # from plain positional tokens and the model learns the distinction.
-            self.look_invalid_emb = nn.Parameter(torch.zeros(1, 1, hidden_dim))
+            if not self.mask_invalid_lookahead:
+                # Added to tokens whose validity is 0 (padding / truncated
+                # preview). Zero-init: an all-invalid preview starts out
+                # indistinguishable from plain positional tokens and the model
+                # learns the distinction.
+                self.look_invalid_emb = nn.Parameter(torch.zeros(1, 1, hidden_dim))
 
         self.time_emb = SinusoidalTimeEmbedding(cfg.time_emb_dim, hidden_dim)
 
@@ -218,8 +254,8 @@ class EEMaskedFlowTransformer(nn.Module):
                     ffn_mult=ffn_mult,
                     dropout=cfg.dropout,
                     n_layers=cfg.n_layers,
-                    cross_attention_gate_init=float(
-                        getattr(cfg, "dit_cross_attention_gate_init", 0.1)
+                    residual_gate_init=float(
+                        getattr(cfg, "dit_residual_gate_init", 0.1)
                     ),
                 )
             )
@@ -228,7 +264,14 @@ class EEMaskedFlowTransformer(nn.Module):
                 "temporal_backbone",
                 self.temporal_backbone,
             )
-        self.norm = nn.LayerNorm(hidden_dim)
+        # The dit backbone ends in final_norm + final_ada_ln, so this extra
+        # affine LayerNorm was never applied on that path -- it shipped in every
+        # dit checkpoint as a dead module (emft_ep0355_dit0805 has norm.weight
+        # still exactly 1.0, i.e. it never saw a gradient). Don't create it at
+        # all rather than leave an unused branch someone could re-enable.
+        self.norm: nn.LayerNorm | None = None
+        if self.temporal_backbone != "dit":
+            self.norm = nn.LayerNorm(hidden_dim)
         if out_proj_hidden_mult <= 1:
             self.out_proj = nn.Linear(hidden_dim, n_dof)
         else:
@@ -238,6 +281,13 @@ class EEMaskedFlowTransformer(nn.Module):
                 nn.Linear(out_proj_hidden_dim, n_dof),
             )
         if self.temporal_backbone == "dit":
+            # Zero-init the readout so the whole network predicts v=0 at step 0
+            # (DiT convention: no random output to unlearn). This is only safe
+            # because the dit blocks now start with WARM residual gates
+            # (TemporalDiTSpec.residual_gate_init) -- with both the gates and
+            # this head at zero, branch weights get gradient proportional to a
+            # ~zero gate while the ungated pointwise bypass below feeds this head
+            # directly, and the bypass wins the race. See TemporalDiTSpec.
             output_linear = (
                 self.out_proj
                 if out_proj_hidden_mult <= 1
@@ -260,20 +310,20 @@ class EEMaskedFlowTransformer(nn.Module):
         s_ee: torch.Tensor,
         s_ee_look: torch.Tensor | None,
         look_valid: torch.Tensor | None,
-    ) -> torch.Tensor:
-        """Preview tokens (B, n_look, hidden) from K raw lookahead frames.
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Preview tokens (B, n_look, hidden) + their validity, from K raw frames.
 
         A missing preview degrades gracefully to the all-invalid case (window's
         last frame held still, validity 0) — the truncation-to-zero states seen
         in training, so a lookahead checkpoint can still run without a preview.
         """
         batch = s_ee.shape[0]
+        hold = s_ee[:, -1:].clone()
+        if getattr(self.cfg, "use_ee_vel", False):
+            # Hold-still fallback: held reference => zero velocity, matching
+            # the dataset's invalid-preview padding convention.
+            hold[..., -18:] = 0.0
         if s_ee_look is None:
-            hold = s_ee[:, -1:].clone()
-            if getattr(self.cfg, "use_ee_vel", False):
-                # Hold-still fallback: held reference => zero velocity, matching
-                # the dataset's invalid-preview padding convention.
-                hold[..., -18:] = 0.0
             s_ee_look = hold.expand(batch, self.lookahead_len, s_ee.shape[-1])
             look_valid = None
         if s_ee_look.shape[1] != self.lookahead_len or s_ee_look.shape[-1] != s_ee.shape[-1]:
@@ -293,9 +343,31 @@ class EEMaskedFlowTransformer(nn.Module):
 
         look_ds = s_ee_look[:, :: self.lookahead_stride][:, : self.n_lookahead_tokens]
         valid_ds = look_valid[:, :: self.lookahead_stride][:, : self.n_lookahead_tokens]
-        tokens = self.ee_proj(look_ds) + self.look_pos_emb
-        tokens = tokens + (1.0 - valid_ds.unsqueeze(-1)) * self.look_invalid_emb
-        return tokens
+        look_ds = torch.where(valid_ds.unsqueeze(-1).bool(), look_ds, hold)
+        tokens = self.look_proj(look_ds) + self.look_pos_emb
+        if not self.mask_invalid_lookahead:
+            tokens = tokens + (1.0 - valid_ds.unsqueeze(-1)) * self.look_invalid_emb
+        return tokens, valid_ds
+
+    def _context_key_padding_mask(
+        self,
+        valid_ds: torch.Tensor,
+        seq_len: int,
+    ) -> torch.Tensor:
+        """Exclude invalid preview tokens from the cross-attention key set.
+
+        The per-frame EE tokens occupy the first ``seq_len`` context slots and
+        are never masked, so no row can be fully masked -- which would make the
+        attention softmax divide by zero. ``TemporalDiTTransformer._validate``
+        asserts that invariant.
+        """
+        keep_window = torch.zeros(
+            valid_ds.shape[0],
+            seq_len,
+            device=valid_ds.device,
+            dtype=torch.bool,
+        )
+        return torch.cat([keep_window, ~valid_ds.bool()], dim=1)
 
     def _validate_observation_tensors(
         self,
@@ -326,6 +398,7 @@ class EEMaskedFlowTransformer(nn.Module):
         body_tokens: torch.Tensor,
         context_tokens: torch.Tensor,
         t: torch.Tensor,
+        context_key_padding_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self.temporal_backbone == "flat":
             if self.transformer is None:
@@ -344,7 +417,12 @@ class EEMaskedFlowTransformer(nn.Module):
                 "temporal_backbone",
                 "dit",
             )
-        return self.temporal_dit(body_tokens, context_tokens, self.time_emb(t))
+        return self.temporal_dit(
+            body_tokens,
+            context_tokens,
+            self.time_emb(t),
+            context_key_padding_mask,
+        )
 
     @staticmethod
     def _t_broadcast(t: torch.Tensor, batch: int, seq_len: int) -> torch.Tensor:
@@ -442,15 +520,27 @@ class EEMaskedFlowTransformer(nn.Module):
             body_tokens = body_tokens + self._time_tokens(t, batch, seq_len)
         ee_tokens = self.ee_proj(s_ee) + self.ee_pos_emb[:, :seq_len]
         tokens = [ee_tokens]
+        context_key_padding_mask = None
         if self.n_lookahead_tokens > 0:
-            tokens.append(self._lookahead_tokens(s_ee, s_ee_look, look_valid))
+            look_tokens, look_valid_ds = self._lookahead_tokens(
+                s_ee,
+                s_ee_look,
+                look_valid,
+            )
+            tokens.append(look_tokens)
+            if self.mask_invalid_lookahead:
+                context_key_padding_mask = self._context_key_padding_mask(
+                    look_valid_ds,
+                    seq_len,
+                )
         hidden = self._encode_body_tokens(
             body_tokens,
             torch.cat(tokens, dim=1),
             t,
+            context_key_padding_mask,
         )
 
-        if self.temporal_backbone != "dit":
+        if self.norm is not None:
             hidden = self.norm(hidden)
         pred_v = self.out_proj(hidden) * (1.0 - obs_mask)
 
@@ -719,7 +809,128 @@ def load_masked_flow_state_dict(
         for name, param in model.ee_frame_proj.state_dict().items():
             state_dict[f"ee_frame_proj.{name}"] = torch.zeros_like(param)
 
+    _migrate_lookahead_projection(model, state_dict)
+    _migrate_dit_cross_attention(model, state_dict)
+
+    # The dit backbone no longer builds the unused affine LayerNorm that older
+    # dit checkpoints stored (it was never applied on that path, so dropping it
+    # changes nothing numerically).
+    if getattr(model, "norm", None) is None:
+        state_dict.pop("norm.weight", None)
+        state_dict.pop("norm.bias", None)
+
     model.load_state_dict(state_dict)
+
+
+def _migrate_lookahead_projection(
+    model: EEMaskedFlowTransformer,
+    state_dict: dict[str, torch.Tensor],
+) -> None:
+    """Seed the new dedicated ``look_proj`` from the shared ``ee_proj``.
+
+    Preview tokens used to reuse ``ee_proj``. Copying those weights reproduces
+    the old behaviour exactly, so an existing checkpoint keeps its numerics and
+    only a re-run can learn to separate the two token kinds.
+    """
+    if not hasattr(model, "look_proj"):
+        return
+    if any(key.startswith("look_proj.") for key in state_dict):
+        return
+    for name in model.look_proj.state_dict():
+        source = state_dict.get(f"ee_proj.{name}")
+        if source is None:
+            return
+        state_dict[f"look_proj.{name}"] = source.clone()
+
+
+def _migrate_dit_cross_attention(
+    model: EEMaskedFlowTransformer,
+    state_dict: dict[str, torch.Tensor],
+) -> None:
+    """Fold a 6-chunk adaLN + static cross-attention gate into the 9-chunk head.
+
+    Old blocks emitted (attn shift, scale, gate, mlp shift, scale, gate) and
+    scaled the cross-attention residual by a standalone ``gate`` Parameter while
+    reusing the SELF-attention shift/scale for its query. The new head emits a
+    dedicated (shift, scale, gate) triple per branch.
+
+    The rewrite is exact: the cross shift/scale rows are copied from the
+    attention rows, and the cross gate is expressed as a constant by zeroing its
+    weight rows and putting the old static gate in its bias. So a migrated
+    checkpoint evaluates bit-for-bit as it did before.
+    """
+    dit = getattr(model, "temporal_dit", None)
+    if dit is None:
+        return
+    hidden = dit.hidden_dim
+    for index, _ in enumerate(dit.blocks):
+        prefix = f"temporal_dit.blocks.{index}"
+        weight = state_dict.get(f"{prefix}.ada_ln.1.weight")
+        if weight is None or weight.shape[0] == N_ADA_LN_CHUNKS * hidden:
+            continue
+        if weight.shape[0] != 6 * hidden:
+            raise RuntimeError(
+                f"Unsupported temporal DiT adaLN width {tuple(weight.shape)} at "
+                f"{prefix}; expected {6 * hidden} (legacy) or "
+                f"{N_ADA_LN_CHUNKS * hidden} (current)."
+            )
+        bias = state_dict[f"{prefix}.ada_ln.1.bias"]
+        block = dit.blocks[index]
+        if f"{prefix}.context_attention.gate" in state_dict:
+            static_gate = state_dict.pop(f"{prefix}.context_attention.gate")
+        else:
+            # Pre-cross-attention dit checkpoint: the block had no context
+            # branch at all. A zero gate switches the branch off, so the
+            # migrated block computes exactly what that checkpoint computed;
+            # the (unused) attention weights come from a fresh init.
+            static_gate = torch.zeros(hidden, dtype=bias.dtype)
+            for name, param in block.context_attention.state_dict().items():
+                state_dict.setdefault(
+                    f"{prefix}.context_attention.{name}",
+                    param.detach().clone(),
+                )
+
+        def rows(tensor: torch.Tensor, chunk: int) -> torch.Tensor:
+            return tensor[chunk * hidden : (chunk + 1) * hidden]
+
+        # legacy chunk order: 0 attn_shift, 1 attn_scale, 2 attn_gate,
+        #                     3 mlp_shift,  4 mlp_scale,  5 mlp_gate
+        state_dict[f"{prefix}.ada_ln.1.weight"] = torch.cat(
+            [
+                rows(weight, 0),
+                rows(weight, 1),
+                rows(weight, 2),
+                rows(weight, 0),  # cross shift reused the attention shift
+                rows(weight, 1),  # cross scale reused the attention scale
+                torch.zeros_like(rows(weight, 0)),  # cross gate was a constant
+                rows(weight, 3),
+                rows(weight, 4),
+                rows(weight, 5),
+            ],
+            dim=0,
+        )
+        state_dict[f"{prefix}.ada_ln.1.bias"] = torch.cat(
+            [
+                rows(bias, 0),
+                rows(bias, 1),
+                rows(bias, 2),
+                rows(bias, 0),
+                rows(bias, 1),
+                static_gate.reshape(hidden).to(bias.dtype),
+                rows(bias, 3),
+                rows(bias, 4),
+                rows(bias, 5),
+            ],
+            dim=0,
+        )
+        # norm_context became affine; identity gains reproduce the old
+        # non-affine normalization exactly.
+        norm_weight = f"{prefix}.context_attention.norm_context.weight"
+        if norm_weight not in state_dict:
+            state_dict[norm_weight] = torch.ones(hidden, dtype=bias.dtype)
+            state_dict[f"{prefix}.context_attention.norm_context.bias"] = (
+                torch.zeros(hidden, dtype=bias.dtype)
+            )
 
 
 def load_masked_flow_from_checkpoint(
@@ -757,6 +968,16 @@ def load_masked_flow_from_checkpoint(
         cfg.out_proj_hidden_mult = sd["out_proj.0.weight"].shape[0] // cfg.hidden_dim
     else:
         cfg.out_proj_hidden_mult = 2
+
+    # Pin the invalid-preview convention to what this checkpoint was TRAINED
+    # with rather than to whatever the current default is. `look_invalid_emb`
+    # only exists in checkpoints from the marker era; masking-era checkpoints
+    # drop it. Inferring it from the weights keeps a stored model from silently
+    # switching convention when the default flips -- on emft_ep0355_dit0805,
+    # turning masking on shifted the prediction by 3% RMS on a half-truncated
+    # preview, and ~50% of its training samples had a truncated preview.
+    if int(getattr(cfg, "lookahead_len", 0)) > 0:
+        cfg.dit_mask_invalid_lookahead = "look_invalid_emb" not in sd
 
     model = EEMaskedFlowTransformer(cfg).to(device)
     load_masked_flow_state_dict(model, sd)

@@ -44,6 +44,88 @@ class EMA:
         for ema_param, param in zip(self.model.parameters(), model.parameters()):
             ema_param.data.lerp_(param.data, 1.0 - self.decay)
 
+def _is_no_decay_param(name: str, param: nn.Parameter) -> bool:
+    """True for parameters AdamW must not shrink toward zero.
+
+    Weight decay is a prior that "smaller is better". That is right for the
+    weight matrices, and wrong for every parameter whose zero is a degenerate
+    operating point rather than a simple model:
+
+    * the adaLN modulation biases (``ada_ln.1.bias``) carry the residual GATES.
+      A gate at 0 switches its branch off AND removes the branch weights'
+      gradient (d loss / d branch ~ gate), so decay pulling a gate down is
+      self-reinforcing -- the dead-branch lock-in measured on
+      emft_ep0355_dit0805 (cross-attention gate 0.0064-0.0102 absmean).
+    * LayerNorm gains at 0 erase their activations entirely.
+    * biases only shift; decaying them adds no capacity control.
+    * the learned positional / tag tables (``pos_emb``, ``ee_pos_emb``,
+      ``look_pos_emb``, ``look_invalid_emb``) are absolute codes, not
+      transformations; decay just makes tokens indistinguishable.
+
+    All of those are exactly the <=1-dim parameters plus the ``*_emb`` tables,
+    which is the standard GPT/DiT split.
+    """
+    if param.ndim <= 1:
+        return True
+    return name.rsplit(".", 1)[-1].endswith("emb")
+
+
+def build_adamw_param_groups(
+    model: nn.Module, weight_decay: float
+) -> list[dict]:
+    """AdamW param groups: decay the weight matrices, spare gates/norms/biases."""
+    decay: list[nn.Parameter] = []
+    no_decay: list[nn.Parameter] = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        (no_decay if _is_no_decay_param(name, param) else decay).append(param)
+    groups: list[dict] = [{"params": decay, "weight_decay": float(weight_decay)}]
+    if no_decay:
+        groups.append({"params": no_decay, "weight_decay": 0.0})
+    return groups
+
+
+def migrate_single_group_optimizer_state(
+    model: nn.Module, optimizer: torch.optim.Optimizer, state: dict
+) -> dict:
+    """Re-index a 1-group AdamW state onto the 2-group split.
+
+    Checkpoints saved before the decay/no-decay split hold one group whose
+    ``params`` are indices into ``model.parameters()`` order. The split is a
+    permutation of the same parameter set, so the Adam moments can be carried
+    over exactly -- just renumbered. Returns ``state`` unchanged if it is not a
+    single-group state; returns None if the parameter sets do not match (caller
+    then starts the moments fresh).
+    """
+    old_groups = state.get("param_groups") or []
+    if len(old_groups) != 1:
+        return state
+    old_params = list(model.parameters())
+    if len(old_groups[0].get("params", [])) != len(old_params):
+        return None
+    old_index_by_id = {id(p): i for i, p in enumerate(old_params)}
+    old_state = state.get("state", {})
+    new_state: dict = {}
+    new_groups: list[dict] = []
+    next_index = 0
+    for group in optimizer.param_groups:
+        indices: list[int] = []
+        for param in group["params"]:
+            old_index = old_index_by_id.get(id(param))
+            if old_index is None:
+                return None
+            if old_index in old_state:
+                new_state[next_index] = old_state[old_index]
+            indices.append(next_index)
+            next_index += 1
+        merged = {k: v for k, v in old_groups[0].items() if k != "params"}
+        merged["weight_decay"] = group["weight_decay"]
+        merged["params"] = indices
+        new_groups.append(merged)
+    return {"state": new_state, "param_groups": new_groups}
+
+
 def _cosine_warmup(optimizer, warmup_steps: int, total_steps: int):
     def lr_lambda(step: int) -> float:
         if step < warmup_steps:
@@ -170,7 +252,7 @@ class MaskedFlowTransformerTrainer:
         )
 
         self.optimizer = torch.optim.AdamW(
-            self.model.parameters(),
+            build_adamw_param_groups(self.model, cfg.train.weight_decay),
             lr=cfg.train.lr,
             weight_decay=cfg.train.weight_decay,
         )
@@ -976,7 +1058,16 @@ class MaskedFlowTransformerTrainer:
         )
         load_masked_flow_state_dict(self.model, state["model"])
         load_masked_flow_state_dict(self.ema.model, state["ema_model"])
-        self.optimizer.load_state_dict(state["optimizer"])
+        opt_state = migrate_single_group_optimizer_state(
+            self.model, self.optimizer, state["optimizer"]
+        )
+        if opt_state is None:
+            print(
+                "  [resume] optimizer state does not match the current "
+                "parameter set - starting Adam moments fresh"
+            )
+        else:
+            self.optimizer.load_state_dict(opt_state)
         if "scheduler" in state:
             self.scheduler.load_state_dict(state["scheduler"])
         self.global_step = state.get("step", 0)

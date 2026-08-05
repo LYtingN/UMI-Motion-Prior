@@ -18,7 +18,7 @@ primitive:
   history_len: 2
   future_len: 8
   num_primitives: 4
-  segment_unrolls: 1
+  segment_unrolls: 2
   segment_stride: 8
   rollout_start_ratio: 0.012
   rollout_end_ratio: 0.09
