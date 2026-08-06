@@ -757,6 +757,15 @@ class MaskedFlowTransformerTrainer:
 
         losses: list[MaskedFlowLossOutput] = []
         carried_history: torch.Tensor | None = None
+        abs_root = bool(getattr(self.cfg, "abs_root_channels", False))
+        # Heading frame the carried history currently lives in. Segment 0 is
+        # teacher-forced from GT, so it starts at the GT anchor; each re-anchor
+        # below moves it to a *predicted* heading.
+        # Exact for segment_unrolls == 2 (the only configured value): the single
+        # re-anchor then reads anchor_yaw[:, 0], which really is GT. For >= 3 it
+        # is approximate, because _select_history mixes GT and rolled-out history
+        # per sample at prim_idx 0, so some samples' true frame is the GT anchor.
+        carried_anchor_yaw = anchor_yaw[:, 0]
         segment_keys = (
             "s_full_prim",
             "s_ee_prim",
@@ -772,12 +781,31 @@ class MaskedFlowTransformerTrainer:
                 if key in batch
             }
             if carried_history is not None and not force_teacher:
+                # Mirror inference (visual/recon_delta69.py:909, which passes
+                # prev_pred_yaws[carry_idx] = prev_anchor + atan2(p[.,72], p[.,71])):
+                # the destination frame is the *predicted* world heading at the
+                # carried history's frame 0, NOT the GT anchor_yaw[:, segment_idx].
+                # reanchor_predicted_history's yaw branch unconditionally rebases
+                # [71:73] to that predicted frame (yaw_rel = yaw - yaw[:, :1]), so
+                # a GT dst rotates [7:9]/[69:71] by the GT turn while the heading
+                # channels follow the predicted one -- the two then disagree by
+                # exactly the yaw error, worst on the hardest samples.
+                if abs_root:
+                    next_anchor_yaw = carried_anchor_yaw + torch.atan2(
+                        carried_history[:, 0, 72].float(),
+                        carried_history[:, 0, 71].float(),
+                    )
+                else:
+                    # Legacy relative layout carries no accumulated-yaw channel
+                    # to read the predicted heading from; keep the GT anchor.
+                    next_anchor_yaw = anchor_yaw[:, segment_idx]
                 carried_history = reanchor_predicted_history(
                     carried_history,
-                    src_anchor_yaw=anchor_yaw[:, segment_idx - 1],
-                    dst_anchor_yaw=anchor_yaw[:, segment_idx],
-                    abs_root=bool(getattr(self.cfg, "abs_root_channels", False)),
+                    src_anchor_yaw=carried_anchor_yaw,
+                    dst_anchor_yaw=next_anchor_yaw,
+                    abs_root=abs_root,
                 )
+                carried_anchor_yaw = next_anchor_yaw
             loss_out, final_prediction = self._step_primitive_segment(
                 segment_batch,
                 train=train,

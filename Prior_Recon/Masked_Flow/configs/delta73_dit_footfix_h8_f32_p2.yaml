@@ -19,7 +19,7 @@ primitive:
   future_len: 32
   num_primitives: 2
   segment_unrolls: 2
-  segment_stride: 4
+  segment_stride: 4          # record_len=136; 4 帧滑窗 -> 1.91M train 窗口 = 233 steps/epoch
   rollout_start_ratio: 0.012
   rollout_end_ratio: 0.09
   rollout_max_prob: 1.0
@@ -102,7 +102,11 @@ loss:
   self_skate_weight: 0.03
   contact_pred_weight: 0.5
   contact_pred_bce: true
-  contact_pred_pos_weight: 0.2
+  # 无偏概率头: p* = w*q/((1-q)+w*q), p*>=0.5 需要 q >= 1/(1+w)
+  # w=0.2 时门槛 q>=0.833, 接触通道几乎不过下游 0.5 阈值 (foot_lock / evaluate_foot_skate),
+  # self_skate 的 self-gate mask 也随之失效. w=1.0 -> 门槛 q>=0.5, 无偏.
+  # 召回不足请调下游 foot_lock_qpos(contact_threshold=...), 不要重新偏置这里.
+  contact_pred_pos_weight: 1.0
   root_consistency_weight: 0.05
   root_vel_weight: 0.03
   root_height_weight: 0.5
