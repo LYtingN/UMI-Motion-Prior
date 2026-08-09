@@ -160,7 +160,9 @@ def main() -> None:
     if args.amp is not None:
         cfg.train.amp = args.amp
 
-    feat_root = os.path.expanduser(args.feat_root or _DEFAULT_FEAT_ROOT)
+    feat_root = os.path.expanduser(
+        args.feat_root or cfg.feat_root or _DEFAULT_FEAT_ROOT
+    )
     csv_root  = os.path.expanduser(args.csv_root) if args.csv_root else None
 
     tensorboard_log_dir = None

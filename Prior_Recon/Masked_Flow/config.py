@@ -225,6 +225,7 @@ class EEMaskedFlowConfig:
             ckpt_dir="checkpoints/Prior_Recon/masked_flow",
         )
     )
+    feat_root: str | None = None
 
     hidden_dim: int = 512
     n_layers: int = 8

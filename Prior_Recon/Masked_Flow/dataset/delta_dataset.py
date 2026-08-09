@@ -48,6 +48,9 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
 from Prior_Recon.Masked_Flow.config import EEMaskedFlowConfig
+from Prior_Recon.Masked_Flow.dataset.feature_files import (
+    select_feature_files as _select_feature_files,
+)
 
 # ---------------------------------------------------------------------------
 # Keypoint column names — identical to g1_sonic_dataset.py
@@ -462,22 +465,6 @@ class _WindowRecord:
 def _iter_starts(total_len: int, window_len: int, stride: int) -> Iterable[int]:
     stride = max(int(stride), 1)
     return range(0, total_len - window_len + 1, stride)
-
-
-def _select_feature_files(
-    feat_root: Path,
-    include_mirror: bool,
-    val_split: float,
-    split: str,
-) -> list[Path]:
-    feat_files = sorted(feat_root.rglob("*.npz")) + sorted(feat_root.rglob("*.npy"))
-    if not include_mirror:
-        feat_files = [f for f in feat_files if not f.stem.endswith("_M")]
-    if not feat_files:
-        raise FileNotFoundError(f"No feature files found under {feat_root}")
-
-    n_val = max(1, int(len(feat_files) * val_split))
-    return feat_files[:n_val] if split == "val" else feat_files[n_val:]
 
 
 class G1DeltaFeatDataset:

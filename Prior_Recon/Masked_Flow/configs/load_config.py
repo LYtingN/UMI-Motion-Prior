@@ -40,6 +40,7 @@ def _build_config(d: dict[str, Any]) -> EEMaskedFlowConfig:
     loss      = _build_loss(d.get("loss") or {})
 
     top_keys = {
+        "feat_root",
         "hidden_dim", "n_layers", "n_heads", "dropout", "time_emb_dim",
         "ode_steps", "transformer_ffn_mult", "out_proj_hidden_mult",
         "temporal_backbone",
