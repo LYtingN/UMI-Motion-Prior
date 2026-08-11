@@ -1,5 +1,5 @@
 config_version: 1
-cluster: aliyun_h100
+cluster: aliyun
 num_gpus: 32
 image: "ai-base:ubuntu22.04-sim5.0.0-lab_MD2.2.1-ray2.52.0-cu12.8_devel-v1.4"
 
