@@ -33,6 +33,8 @@ tasks:
       - "/data/nas_ray/home/eason_er/delta_feat_v4"
       - "--gpu-memory-fraction"
       - "0.9"
+      - "--amp"
+      - "bf16"
       # ckpt 落 NAS 持久化(不落 pod 内易失的仓库根);传 --ckpt-dir 则跳过日期后缀
       - "--ckpt-dir"
       - "/data/nas_ray/home/eason_er/checkpoints/Prior_Recon/masked_flow_delta73_footfix_aliyun_4090_32gpu"
