@@ -1,0 +1,120 @@
+# Oracle EE+root+feet condition analysis. Keep the same objectives as the root
+# condition so the comparison isolates the added foot condition.
+oracle_condition: root_feet
+
+skeleton:
+  name: g1_delta69
+  n_total_joints: 69
+  upper_body_global_indices: null
+  wrist_local_indices: []
+
+motion:
+  joint_repr: dof
+  seq_len: 40
+  fps: 30
+  window_stride: 32
+  normalize: false
+
+primitive:
+  enabled: true
+  history_len: 8
+  future_len: 32
+  num_primitives: 2
+  segment_unrolls: 2
+  segment_stride: 4
+  rollout_start_ratio: 0.012
+  rollout_end_ratio: 0.09
+  rollout_max_prob: 1.0
+  val_rollout: true
+
+train:
+  lr: 5.66e-4
+  weight_decay: 1.0e-4
+  batch_size: 8192
+  max_microbatch_size: 512
+  num_workers: 2
+  gpu_memory_fraction: 0.9
+  n_epochs: 300
+  grad_clip: 1.0
+  ema_decay: 0.999
+  warmup_epochs: 3
+  val_split: 0.1
+  log_interval: 50
+  ckpt_dir: checkpoints/Prior_Recon/masked_flow_delta73_dit_cross_footfix_h8_f32_p2_small_oracle_root_feet
+
+hidden_dim: 384
+n_layers: 10
+n_heads: 6
+dropout: 0.1
+time_emb_dim: 192
+transformer_ffn_mult: 4
+temporal_backbone: dit
+dit_residual_gate_init: 0.1
+dit_mask_invalid_lookahead: true
+ode_steps: 16
+
+use_ee_pos: true
+use_ee_height_anchor: true
+use_ee_vel: true
+ee_state_dim: 0
+use_ee_anchor: true
+
+abs_root_channels: true
+ee_cond_segment_anchor: true
+segment_geometry_loss: true
+
+history_perturb_prob: 0.5
+history_perturb_joint_std: 0.05
+history_perturb_tilt_std: 0.03
+
+use_logit_normal_t: true
+logit_normal_sigma: 1.0
+per_frame_noise: false
+
+loss:
+  flow_weight: 1.0
+  recon_weight: 0.15
+  velocity_weight: 0.15
+  leg_joint_weight: 1.0
+  root_weight: 1.5
+  accel_weight: 0.05
+  contact_weight: 0.0
+  body_trans_weight: 0.05
+  body_rot_weight: 0.01
+  ee_pos_weight: 0.0
+  ee_rot_weight: 0.0
+  ee_cond_pos_weight: 2.0
+  ee_cond_rot_weight: 0.2
+  anchor_rot_weight: 0.2
+  dof_pos_weight: 0.03
+  dof_vel_weight: 0.0
+  foot_contact_weight: 0.0
+  foot_skate_weight: 0.0
+  foot_rot_weight: 0.0
+  foot_sole_pos_weight: 0.8
+  foot_sole_skate_weight: 0.1
+  boundary_foot_skate_weight: 0.1
+  boundary_foot_skate_topk_ratio: 0.25
+  self_skate_weight: 0.03
+  contact_pred_weight: 0.5
+  contact_pred_bce: true
+  contact_pred_pos_weight: 1.0
+  root_consistency_weight: 0.05
+  root_vel_weight: 0.03
+  root_height_weight: 0.5
+  drift_yaw_weight: 0.05
+  drift_xy_weight: 0.5
+  root_curriculum_start_mult: 1.5
+  root_curriculum_end_ratio: 0.06
+  ee_curriculum_start_ratio: 0.012
+  ee_curriculum_end_ratio: 0.09
+  skate_curriculum_start_ratio: 0.09
+  skate_curriculum_end_ratio: 0.18
+  smooth_weight: 0.0
+  seam_vel_weight: 0.5
+  seam_accel_weight: 0.1
+  quantize_rot_weight: 0.0
+  quantize_trans_weight: 0.0
+
+lookahead_len: 32
+lookahead_stride: 4

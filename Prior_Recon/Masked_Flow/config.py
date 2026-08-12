@@ -265,6 +265,11 @@ class EEMaskedFlowConfig:
     # obs_mask at train and sample time. 0 keeps the legacy delta69 layout
     # where EE enters only through the soft s_ee condition tokens.
     ee_state_dim: int = 0
+    # Oracle-only mocap analysis condition. ``root`` appends the GT pelvis pose
+    # (pos3 + rot6d); ``root_feet`` additionally appends both GT foot poses.
+    # The default keeps the proposed deployable EE-only path byte-for-byte
+    # unchanged. Oracle checkpoints are intentionally not deployable on UMI.
+    oracle_condition: str = "none"
     # EE lookahead: condition each primitive on this many EE frames BEYOND its
     # window end (soft preview tokens), so the body can anticipate where the
     # hands are heading (e.g. start stepping before the arm runs out of reach).
@@ -377,9 +382,21 @@ class EEMaskedFlowConfig:
             base += 2
         if getattr(self, "use_ee_anchor", False):
             base += self.EE_ANCHOR_DIM
+        base += self.oracle_condition_dim
         if self.use_ee_vel:
             base += 18
         return base
+
+    @property
+    def oracle_condition_dim(self) -> int:
+        mode = str(getattr(self, "oracle_condition", "none"))
+        try:
+            return {"none": 0, "root": 9, "root_feet": 27}[mode]
+        except KeyError as exc:
+            raise ValueError(
+                "oracle_condition must be one of: none, root, root_feet; "
+                f"got {mode!r}."
+            ) from exc
 
     @property
     def ee_anchor_offset(self) -> int:

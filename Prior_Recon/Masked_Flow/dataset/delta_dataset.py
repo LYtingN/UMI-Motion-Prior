@@ -684,6 +684,10 @@ class G1DeltaFeatPrimitiveDataset:
         self._segment_unrolls = segment_unrolls
         self._look_len = int(getattr(cfg, "lookahead_len", 0))
         self._abs_root = bool(getattr(cfg, "abs_root_channels", False))
+        self._oracle_condition = str(getattr(cfg, "oracle_condition", "none"))
+        _ = cfg.oracle_condition_dim  # validate the mode once at construction
+        if self._oracle_condition != "none" and not self._abs_root:
+            raise ValueError("oracle_condition requires abs_root_channels=True.")
 
     def __len__(self) -> int:
         return len(self._records)
@@ -728,6 +732,11 @@ class G1DeltaFeatPrimitiveDataset:
             look_valid[:n_real] = 1.0
             item["keypoints_look"] = torch.from_numpy(kp_look)
             item["look_frames_valid"] = torch.from_numpy(look_valid)
+            if self._oracle_condition != "none":
+                feat_ext = _heading_align(raw, start, avail, abs_root=self._abs_root)
+                feat_look = np.repeat(feat_ext[-1:], look_len, axis=0)
+                feat_look[:n_real] = feat_ext[seg_len:avail]
+                item["oracle_feat_look"] = torch.from_numpy(feat_look.astype(np.float32))
         return item
 
     def __getitem__(self, idx: int) -> dict:
@@ -809,6 +818,17 @@ class MaskedFlowDataset(Dataset):
         self.base = base_dataset
         self.cfg = cfg
         self.wrist_idx = cfg.skeleton.wrist_local_indices
+        self.oracle_condition = str(getattr(cfg, "oracle_condition", "none"))
+        _ = cfg.oracle_condition_dim  # validate before constructing the model
+        if self.oracle_condition != "none" and not getattr(cfg, "abs_root_channels", False):
+            raise ValueError("oracle_condition requires abs_root_channels=True.")
+        self._oracle_fk = None
+        if self.oracle_condition == "root_feet":
+            from Prior_Recon.Masked_Flow.loss.g1_kinematics import (
+                G129DeltaForwardKinematics,
+            )
+
+            self._oracle_fk = G129DeltaForwardKinematics(fps=cfg.motion.fps).eval()
         self.ee_state_dim = int(getattr(cfg, "ee_state_dim", 0))
         if self.ee_state_dim not in (0, 18):
             raise ValueError(
@@ -882,7 +902,9 @@ class MaskedFlowDataset(Dataset):
             return kp, None
         return kp, kp_z0 + offset[0, :, 2]
 
-    def _build_s_ee(self, item: dict) -> torch.Tensor:
+    def _build_s_ee(
+        self, item: dict, oracle: torch.Tensor | None = None
+    ) -> torch.Tensor:
         feat = item["feat"]
         T = feat.shape[0]
 
@@ -893,7 +915,57 @@ class MaskedFlowDataset(Dataset):
         else:
             s_ee = feat[:, self.wrist_idx, :].reshape(T, -1)
 
-        return s_ee
+        if oracle is None:
+            oracle = self._oracle_features(feat.reshape(T, -1))
+        return self._insert_oracle_condition(s_ee, oracle)
+
+    def _oracle_features(self, feat: torch.Tensor) -> torch.Tensor:
+        """GT segment-local pelvis/foot poses used only by oracle ablations."""
+        if self.oracle_condition == "none":
+            return feat.new_empty(feat.shape[0], 0)
+
+        from Prior_Recon.Masked_Flow.loss.masked_flow_loss import (
+            _delta69_to_clip_state,
+        )
+
+        body = feat[..., : self.cfg.n_motion_dof].unsqueeze(0)
+        state = _delta69_to_clip_state(body, abs_root=True)
+        root = torch.cat([state["root_pos"], state["root_rot_6d"]], dim=-1)[0]
+        if self.oracle_condition == "root":
+            return root
+
+        assert self._oracle_fk is not None
+        with torch.no_grad():
+            fk = self._oracle_fk(
+                root_pos=state["root_pos"],
+                root_rot_mat=state["root_rot_mat"],
+                dof_pos=state["dof_pos"],
+            )
+        feet = torch.cat(
+            [fk["foot_translation"], fk["foot_rotation_6d"]], dim=-1
+        ).flatten(-2)[0]
+        return torch.cat([root, feet], dim=-1)
+
+    def _append_oracle_condition(
+        self, s_ee: torch.Tensor, feat: torch.Tensor
+    ) -> torch.Tensor:
+        return self._insert_oracle_condition(s_ee, self._oracle_features(feat))
+
+    def _insert_oracle_condition(
+        self, s_ee: torch.Tensor, oracle: torch.Tensor
+    ) -> torch.Tensor:
+        if oracle.shape[-1] == 0:
+            return s_ee
+        if oracle.shape[:-1] != s_ee.shape[:-1]:
+            raise ValueError(
+                f"Oracle shape {tuple(oracle.shape)} does not match s_ee "
+                f"shape {tuple(s_ee.shape)}."
+            )
+        # Preserve the existing contract that EE velocity occupies the last 18
+        # dimensions (loss and lookahead padding both rely on that slice).
+        if self.cfg.use_ee_vel:
+            return torch.cat([s_ee[..., :-18], oracle, s_ee[..., -18:]], dim=-1)
+        return torch.cat([s_ee, oracle], dim=-1)
 
     def _build_ee_state_segment(self, item: dict) -> torch.Tensor:
         """Segment-anchored per-frame EE pose columns (T, 18).
@@ -913,6 +985,7 @@ class MaskedFlowDataset(Dataset):
         self,
         item: dict,
         prim_cfg,
+        oracle_ext: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Per-primitive EE preview windows (N, K, E) plus validity (N, K).
 
@@ -932,6 +1005,16 @@ class MaskedFlowDataset(Dataset):
         kp_ext = torch.cat([item["keypoints"], item["keypoints_look"]], dim=0)
         kp_ext_reb, kp_z0_reb = self._rebase_keypoints_to_window(kp_ext, item.get("kp_z0"))
         s_ee_ext = self._build_s_ee_from_keypoints(kp_ext_reb, kp_z0_reb)
+        if oracle_ext is None and self.oracle_condition != "none":
+            if "oracle_feat_look" not in item:
+                raise ValueError("oracle lookahead features are missing from the base dataset item.")
+            oracle_feat_ext = torch.cat(
+                [item["feat"].reshape(item["feat"].shape[0], -1), item["oracle_feat_look"]],
+                dim=0,
+            )
+            oracle_ext = self._oracle_features(oracle_feat_ext)
+        if oracle_ext is not None:
+            s_ee_ext = self._insert_oracle_condition(s_ee_ext, oracle_ext)
         seg_len = item["keypoints"].shape[0]
         valid_ext = torch.cat(
             [
@@ -969,7 +1052,12 @@ class MaskedFlowDataset(Dataset):
             valid_prim.append(valid)
         return torch.stack(look_prim, dim=0), torch.stack(valid_prim, dim=0)
 
-    def _build_s_ee_primitive_windows(self, item: dict, prim_cfg) -> torch.Tensor:
+    def _build_s_ee_primitive_windows(
+        self,
+        item: dict,
+        prim_cfg,
+        oracle: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         if self.cfg.use_ee_pos and "keypoints" in item:
             kp = item["keypoints"]
             kp_z0 = item.get("kp_z0")
@@ -979,6 +1067,11 @@ class MaskedFlowDataset(Dataset):
             # is then a pure view over the segment-wide condition.
             kp_seg, kp_z0_seg = self._rebase_keypoints_to_window(kp, kp_z0)
             s_ee_seg = self._build_s_ee_from_keypoints(kp_seg, kp_z0_seg)
+            if oracle is None:
+                oracle = self._oracle_features(
+                    item["feat"].reshape(item["feat"].shape[0], -1)
+                )
+            s_ee_seg = self._insert_oracle_condition(s_ee_seg, oracle)
             s_ee_prim = []
             for prim_idx in range(prim_cfg.num_primitives):
                 start = prim_idx * prim_cfg.future_len
@@ -986,7 +1079,7 @@ class MaskedFlowDataset(Dataset):
                 s_ee_prim.append(s_ee_seg[start:end])
             return torch.stack(s_ee_prim, dim=0)
 
-        s_ee = self._build_s_ee(item)
+        s_ee = self._build_s_ee(item, oracle)
         s_ee_prim = []
         for prim_idx in range(prim_cfg.num_primitives):
             start = prim_idx * prim_cfg.future_len
@@ -1014,8 +1107,21 @@ class MaskedFlowDataset(Dataset):
             start = prim_idx * prim_cfg.future_len
             end = start + prim_len
             s_full_prim.append(dof[start:end])
-        s_ee = self._build_s_ee(item)
-        s_ee_prim = self._build_s_ee_primitive_windows(item, prim_cfg)
+        oracle_ext = None
+        if self.oracle_condition != "none":
+            oracle_feat_ext = feat.reshape(T, -1)
+            if self.lookahead_len > 0:
+                if "oracle_feat_look" not in item:
+                    raise ValueError(
+                        "oracle lookahead features are missing from the base dataset item."
+                    )
+                oracle_feat_ext = torch.cat(
+                    [oracle_feat_ext, item["oracle_feat_look"]], dim=0
+                )
+            oracle_ext = self._oracle_features(oracle_feat_ext)
+        oracle = None if oracle_ext is None else oracle_ext[:T]
+        s_ee = self._build_s_ee(item, oracle)
+        s_ee_prim = self._build_s_ee_primitive_windows(item, prim_cfg, oracle)
         out_item = self._output_item(item)
 
         result = {
@@ -1026,13 +1132,16 @@ class MaskedFlowDataset(Dataset):
             "s_ee_prim": s_ee_prim,
         }
         if self.lookahead_len > 0:
-            look_prim, look_valid = self._build_lookahead_prim_windows(item, prim_cfg)
+            look_prim, look_valid = self._build_lookahead_prim_windows(
+                item, prim_cfg, oracle_ext
+            )
             result["s_ee_look_prim"] = look_prim
             result["look_valid_prim"] = look_valid
             # Raw lookahead keypoint tensors are only intermediate inputs;
             # drop them so default_collate sees a stable schema.
             result.pop("keypoints_look", None)
             result.pop("look_frames_valid", None)
+            result.pop("oracle_feat_look", None)
         return result
 
     def __getitem__(self, idx: int) -> dict:
