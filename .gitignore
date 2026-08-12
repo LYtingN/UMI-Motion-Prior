@@ -19,8 +19,6 @@ Prior_Recon/Masked_Flow/assets/
 /pyroki/
 
 model_deploy/
-# Claude Code
-.claude/
 
 # Python
 __pycache__/
@@ -33,30 +31,63 @@ __pycache__/
 dist/
 build/
 .eggs/
+*.whl
+pip-wheel-metadata/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.pytype/
+.pyre/
+.pyright/
+.hypothesis/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+.nox/
 
 # Environments
 .venv/
 venv/
 env/
+ENV/
 .conda/
 *.egg-link
+.env
+.env.*
+!.env.example
+!.env.template
 
 # Jupyter
 .ipynb_checkpoints/
 *.ipynb
 
-# Misc
-*.log
-*.tmp
-.DS_Store
+# Editors, OS & local tools
+.claude/
+.omc/
+.omo/
+.codegraph/
 .idea/
 .vscode/
-.codegraph/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Misc
+/misc/
+*.log
+*.tmp
+*.bak
+*.pid
+*.prof
 *.parquet
-.omo/
 
 # Experiment logs
 logs/
+runs/
+wandb/
+lightning_logs/
+events.out.tfevents.*

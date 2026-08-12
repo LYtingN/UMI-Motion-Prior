@@ -1,6 +1,6 @@
 config_version: 1
 cluster: aliyun_h100
-num_gpus: 32
+num_gpus: 16
 image: "ai-base:ubuntu22.04-sim5.0.0-lab_MD2.2.1-ray2.52.0-cu12.8_devel-v1.4"
 
 git_workspace:
@@ -20,22 +20,22 @@ py_paths: ["."]
 log_folder: "logs"
 
 tasks:
-  - name: masked_flow
+  - name: masked_flow_delta73_footfix_small
     type: torch_trainer.train
-    run_name: masked_flow_aliyun_4090_32gpu
+    run_name: masked_flow_delta73_footfix_small_aliyun_h100
     entry_module: Prior_Recon/Masked_Flow/scripts/train_delta_flow.py
     args:
       # 路径相对 cwd(=仓库根)解析
       - "--config"
       - "Prior_Recon/Masked_Flow/configs/delta73_dit_footfix_h8_f32_p2_small.yaml"
-      # 无影云本地数据同步到北京 NAS，供阿里 4090 集群访问
+      # Explicit train/val/test splits are used directly by the dataset loader.
       - "--feat-root"
-      - "/data/nas_ray/home/eason_er/delta_feat_v4"
+      - "/data/nas_ray/home/eason.er/delta_feat_v4"
       - "--gpu-memory-fraction"
-      - "0.85"
+      - "0.9"
       # ckpt 落 NAS 持久化(不落 pod 内易失的仓库根);传 --ckpt-dir 则跳过日期后缀
       - "--ckpt-dir"
-      - "/data/nas_ray/home/eason_er/checkpoints/Prior_Recon/masked_flow_delta73_footfix_aliyun_4090_32gpu"
+      - "/data/nas_ray/home/eason.er/checkpoints/Prior_Recon/masked_flow_delta73_footfix_small_aliyun_h1000811"
 
 os_env_vars:
   GH_PAT: "REPLACE_WITH_GITHUB_PAT"
