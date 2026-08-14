@@ -53,7 +53,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--config", default=None, metavar="YAML",
-        help="YAML config file (e.g. configs/delta69_small.yaml). "
+        help="YAML config file (e.g. configs/config_achieve/delta69_small.yaml). "
              "Omit to use the built-in g1sonic_delta_masked_flow_config().",
     )
     parser.add_argument(

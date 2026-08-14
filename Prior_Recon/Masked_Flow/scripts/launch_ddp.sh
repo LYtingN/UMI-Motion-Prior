@@ -29,7 +29,7 @@ MEM_FRACTION="${MEM_FRACTION:-0.45}" # per-process memory cap (avoid OOM'ing nei
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"   # .../Motion_Prior_Manipualtion
 TRAIN_PY="$SCRIPT_DIR/train_delta_flow.py"
-CONFIG="$SCRIPT_DIR/../configs/delta69_full.yaml"
+CONFIG="$SCRIPT_DIR/../configs/config_achieve/delta69_full.yaml"
 FEAT_ROOT="${FEAT_ROOT:-/data/nas_ray/home/eason.nai/train_feat}"
 
 # ── Parse args ──────────────────────────────────────────────────────────────

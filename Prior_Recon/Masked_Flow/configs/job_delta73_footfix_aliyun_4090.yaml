@@ -28,6 +28,9 @@ tasks:
       # 路径相对 cwd(=仓库根)解析
       - "--config"
       - "Prior_Recon/Masked_Flow/configs/delta73_dit_footfix_h8_f32_p2_small.yaml"
+      # Global batch must divide evenly across all 48 workers: 8160 / 48 = 170.
+      - "--batch-size"
+      - "8160"
       # Explicit train/val/test splits are used directly by the dataset loader.
       - "--feat-root"
       - "/data/nas_ray/home/eason.er/delta_feat_v4"

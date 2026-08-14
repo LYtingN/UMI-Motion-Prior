@@ -17,7 +17,7 @@ pip_packages:
 pip_directories: []
 py_modules: []
 # train_delta_flow.py 内部 _find_repo_root() 会自己把仓库根插入 sys.path
-# 以解析 Prior_Recon.Masked_Flow.*;entry_module 相对仓库根解析,
+# 以解析 pipeline.Prior_Recon.Masked_Flow.*;entry_module 相对仓库根解析,
 # 故 py_paths 指向仓库根即可。
 py_paths: ["."]
 log_folder: "logs"
@@ -30,11 +30,11 @@ tasks:
     # 铺满全部 16 卡);trainer 用 utils/distributed.setup_distributed() 直接读这些
     # env 变量、init_process_group(env://)、手动 all_reduce 梯度(非 DDP wrapper、
     # 非 accelerate),所以无需手写 torchrun / accelerate launch。
-    entry_module: Prior_Recon/Masked_Flow/scripts/train_delta_flow.py
+    entry_module: pipeline/Prior_Recon/Masked_Flow/scripts/train_delta_flow.py
     args:
       # 路径相对 cwd(=仓库根)解析
       - "--config"
-      - "Prior_Recon/Masked_Flow/configs/delta73_footfix.yaml"
+      - "pipeline/Prior_Recon/Masked_Flow/configs/delta73_footfix.yaml"
       # delta 特征根:eason.nai 已失效,正确路径在 eason.er(23962 个 npz)
       - "--feat-root"
       - "/data/nas_ray/home/eason.er/train_delta_feat_v3"

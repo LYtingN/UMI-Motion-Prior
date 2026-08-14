@@ -4,7 +4,7 @@ Mirrors train_delta_flow.py but loads a TwoStageMaskedFlowConfig and uses the
 cascade trainer. --config is required (there is no built-in two-stage default).
 
     python Prior_Recon/Masked_Flow/scripts/train_two_stage.py \
-        --config Prior_Recon/Masked_Flow/configs/twostage_delta73_small.yaml
+        --config Prior_Recon/Masked_Flow/configs/config_achieve/twostage_delta73_small.yaml
 """
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ def _find_repo_root(path: Path) -> Path:
 
 sys.path.insert(0, str(_find_repo_root(Path(__file__).resolve())))
 
-from Prior_Recon.Masked_Flow.configs.load_config_two_stage import (
+from Prior_Recon.Masked_Flow.configs.config_achieve.load_config_two_stage import (
     two_stage_config_from_yaml,
 )
 from Prior_Recon.Masked_Flow.dataset.delta_dataset import (
@@ -57,7 +57,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--config", default=None, metavar="YAML",
-        help="Two-stage YAML config (e.g. configs/twostage_delta73_small.yaml). "
+        help="Two-stage YAML config (e.g. configs/config_achieve/twostage_delta73_small.yaml). "
              "Required unless --resume is given.",
     )
     parser.add_argument(

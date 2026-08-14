@@ -1,8 +1,8 @@
 """YAML → EEMaskedFlowConfig 转换工具。
 
 Usage:
-    from Prior_Recon.Masked_Flow.configs.load_config import config_from_yaml
-    cfg = config_from_yaml("configs/delta69_small.yaml")
+    from Prior_Recon.Masked_Flow.configs.config_achieve.load_config import config_from_yaml
+    cfg = config_from_yaml("configs/config_achieve/delta69_small.yaml")
 """
 from __future__ import annotations
 

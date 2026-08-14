@@ -5,10 +5,10 @@
 字段）沿用 load_config 的 builder，语义与单级 YAML 完全一致。
 
 Usage:
-    from Prior_Recon.Masked_Flow.configs.load_config_two_stage import (
+    from Prior_Recon.Masked_Flow.configs.config_achieve.load_config_two_stage import (
         two_stage_config_from_yaml,
     )
-    cfg = two_stage_config_from_yaml("configs/twostage_delta73_small.yaml")
+    cfg = two_stage_config_from_yaml("configs/config_achieve/twostage_delta73_small.yaml")
 """
 from __future__ import annotations
 

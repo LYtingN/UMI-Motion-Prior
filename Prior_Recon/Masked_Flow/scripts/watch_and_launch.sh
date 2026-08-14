@@ -16,7 +16,7 @@ AMP="${AMP:-bf16}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 TRAIN_PY="$SCRIPT_DIR/train_delta_flow.py"
-CONFIG="$SCRIPT_DIR/../configs/delta69_full.yaml"
+CONFIG="$SCRIPT_DIR/../configs/config_achieve/delta69_full.yaml"
 FEAT_ROOT="${FEAT_ROOT:-/data/nas_ray/home/eason.nai/train_feat}"
 TRAIN_LOG="${TRAIN_LOG:-$REPO_ROOT/train_ddp_3gpu.log}"
 
