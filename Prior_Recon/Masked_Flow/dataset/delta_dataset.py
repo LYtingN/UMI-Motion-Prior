@@ -587,6 +587,55 @@ class G1DeltaFeatDataset:
         )
 
 
+def _foot_local_from_raw(fk, raw: np.ndarray, chunk: int = 8192) -> np.ndarray:
+    """Per-frame foot pose in the YAW-FREE root frame, for the whole source file.
+
+    The oracle condition needs world foot poses, but FK is a 30-body Python loop
+    whose cost is per CALL, not per frame -- running it once per training window
+    recomputes every frame ~unroll_len/segment_stride times (34x at the current
+    config) and starves the GPU. It can be hoisted to once per file because the
+    window's heading alignment only enters as a LEFT Rz factor:
+
+        R_root = Rz(yaw_rel) @ Ry(pitch) @ Rx(roll)      (euler_xyz_to_matrix)
+        p_foot = root_pos + R_root @ p_local(dof)
+        R_foot = R_root @ R_local(dof)
+
+    ``_heading_align`` rewrites only dims 7/8 (delta_trans xy) and appends the
+    abs-root channels, so roll (dims 0,1), pitch (dims 2,3) and dof (dims 11:40)
+    are IDENTICAL in every window covering a frame. Running FK with root_pos=0
+    and root_rot=Ry(pitch)Rx(roll) therefore yields window-invariant
+
+        q = Ry Rx @ p_local        S = Ry Rx @ R_local
+
+    and each window recovers the truth with one cheap Rz composition (see
+    ``MaskedFlowDataset._compose_feet_from_local``). Only the first two columns
+    of S are kept: rot6d is ``M[:, :2]`` and ``(Rz @ S)[:, :2] = Rz @ S[:, :2]``.
+
+    Returns (T, 18) float32: 2 feet x translation3, then 2 feet x rot6d.
+    """
+    from Prior_Recon.Masked_Flow.loss.g1_kinematics import euler_xyz_to_matrix
+
+    feat = torch.from_numpy(np.ascontiguousarray(raw[:, :40], dtype=np.float32))
+    total = feat.shape[0]
+    out = np.empty((total, 18), dtype=np.float32)
+    with torch.no_grad():
+        for begin in range(0, total, chunk):
+            end = min(begin + chunk, total)
+            block = feat[begin:end]
+            roll = torch.atan2(block[:, 0], block[:, 1] + 1.0)
+            pitch = torch.atan2(block[:, 2], block[:, 3] + 1.0)
+            r_pitch_roll = euler_xyz_to_matrix(roll, pitch, torch.zeros_like(roll))
+            fk_out = fk(
+                root_pos=torch.zeros(1, end - begin, 3),
+                root_rot_mat=r_pitch_roll.unsqueeze(0),
+                dof_pos=block[:, 11:40].unsqueeze(0),
+            )
+            trans = fk_out["foot_translation"][0].reshape(-1, 6)
+            rot6 = fk_out["foot_rotation_mat"][0][..., :, :2].reshape(-1, 12)
+            out[begin:end] = torch.cat([trans, rot6], dim=-1).numpy()
+    return out
+
+
 class G1DeltaFeatPrimitiveDataset:
     """Segment-level dataset for primitive rollout training.
 
@@ -689,6 +738,26 @@ class G1DeltaFeatPrimitiveDataset:
         if self._oracle_condition != "none" and not self._abs_root:
             raise ValueError("oracle_condition requires abs_root_channels=True.")
 
+        # Per-FILE yaw-free foot poses for the root_feet oracle: FK once per
+        # source file instead of once per window (see _foot_local_from_raw).
+        # Costs ~72 B/frame of extra resident RAM per worker on top of the feat
+        # cache; the "root" oracle needs no FK so it stays unset there.
+        self._foot_local_cache: _ArrayCache | None = None
+        if self._oracle_condition == "root_feet":
+            from Prior_Recon.Masked_Flow.loss.g1_kinematics import (
+                G129DeltaForwardKinematics,
+            )
+
+            foot_fk = G129DeltaForwardKinematics(fps=cfg.motion.fps).eval()
+
+            def _load_foot_local(path: Path) -> np.ndarray:
+                raw_feat, _ = self._feat_cache.get(path)
+                return _foot_local_from_raw(foot_fk, raw_feat)
+
+            self._foot_local_cache = _ArrayCache(
+                _load_foot_local, max_files=cache_files
+            )
+
     def __len__(self) -> int:
         return len(self._records)
 
@@ -697,6 +766,7 @@ class G1DeltaFeatPrimitiveDataset:
         raw: np.ndarray,
         keypoints_abs: np.ndarray,
         start: int,
+        foot_local: np.ndarray | None = None,
     ) -> dict:
         feat_raw = _heading_align(raw, start, self._segment_len, abs_root=self._abs_root)
         seg_len = self._segment_len
@@ -723,6 +793,10 @@ class G1DeltaFeatPrimitiveDataset:
             "fps": float(self._fps),
             "anchor_yaw": float(raw[start, 69]),
         }
+        if foot_local is not None:
+            item["oracle_feet_local"] = torch.from_numpy(
+                foot_local[start : start + seg_len].copy()
+            )
 
         if look_len > 0:
             n_real = avail - seg_len
@@ -737,6 +811,13 @@ class G1DeltaFeatPrimitiveDataset:
                 feat_look = np.repeat(feat_ext[-1:], look_len, axis=0)
                 feat_look[:n_real] = feat_ext[seg_len:avail]
                 item["oracle_feat_look"] = torch.from_numpy(feat_look.astype(np.float32))
+                if foot_local is not None:
+                    # Same hold-the-last-frame padding as feat_look above, so the
+                    # padded frames' yaw/root and foot poses stay consistent.
+                    foot_ext = foot_local[start : start + avail]
+                    foot_look = np.repeat(foot_ext[-1:], look_len, axis=0)
+                    foot_look[:n_real] = foot_ext[seg_len:avail]
+                    item["oracle_feet_local_look"] = torch.from_numpy(foot_look)
         return item
 
     def __getitem__(self, idx: int) -> dict:
@@ -748,11 +829,16 @@ class G1DeltaFeatPrimitiveDataset:
         if keypoints_abs is None:
             raise RuntimeError(f"No keypoints available for {record.feat_path}")
 
+        foot_local = None
+        if self._foot_local_cache is not None:
+            foot_local = self._foot_local_cache.get(record.feat_path)
+
         segments = [
             self._segment_item(
                 raw,
                 keypoints_abs,
                 record.start + segment_idx * self._segment_step,
+                foot_local,
             )
             for segment_idx in range(self._segment_unrolls)
         ]
@@ -919,7 +1005,38 @@ class MaskedFlowDataset(Dataset):
             oracle = self._oracle_features(feat.reshape(T, -1))
         return self._insert_oracle_condition(s_ee, oracle)
 
-    def _oracle_features(self, feat: torch.Tensor) -> torch.Tensor:
+    @staticmethod
+    def _compose_feet_from_local(
+        state: dict, feet_local: torch.Tensor
+    ) -> torch.Tensor:
+        """Rebuild world foot poses from per-file yaw-free FK output.
+
+        Inverse of ``_foot_local_from_raw``: that hoisted the 30-body FK loop to
+        once per source file by dropping the window-dependent yaw, so put it back
+        with the window's own Rz. Numerically identical to running FK here (see
+        the equivalence check in scripts/check_oracle_feet_equivalence.py), but
+        ~2 small matmuls instead of a 30-iteration Python loop per item.
+        """
+        T = feet_local.shape[0]
+        trans_local = feet_local[:, :6].reshape(T, 2, 3)
+        rot6_local = feet_local[:, 6:].reshape(T, 2, 3, 2)
+
+        yaw = state["yaw"][0]
+        cos, sin = torch.cos(yaw), torch.sin(yaw)
+        zero, one = torch.zeros_like(cos), torch.ones_like(cos)
+        rz = torch.stack(
+            [cos, -sin, zero, sin, cos, zero, zero, zero, one], dim=-1
+        ).reshape(T, 1, 3, 3)
+
+        trans = state["root_pos"][0].unsqueeze(1) + torch.matmul(
+            rz, trans_local.unsqueeze(-1)
+        ).squeeze(-1)
+        rot6 = torch.matmul(rz, rot6_local).reshape(T, 2, 6)
+        return torch.cat([trans, rot6], dim=-1).flatten(-2)
+
+    def _oracle_features(
+        self, feat: torch.Tensor, feet_local: torch.Tensor | None = None
+    ) -> torch.Tensor:
         """GT segment-local pelvis/foot poses used only by oracle ablations."""
         if self.oracle_condition == "none":
             return feat.new_empty(feat.shape[0], 0)
@@ -934,6 +1051,12 @@ class MaskedFlowDataset(Dataset):
         if self.oracle_condition == "root":
             return root
 
+        if feet_local is not None:
+            feet = self._compose_feet_from_local(state, feet_local)
+            return torch.cat([root, feet], dim=-1)
+
+        # Fallback: no per-file cache (legacy base datasets, or callers that did
+        # not thread the cached poses through). Same result, ~34x the FK work.
         assert self._oracle_fk is not None
         with torch.no_grad():
             fk = self._oracle_fk(
@@ -1110,6 +1233,7 @@ class MaskedFlowDataset(Dataset):
         oracle_ext = None
         if self.oracle_condition != "none":
             oracle_feat_ext = feat.reshape(T, -1)
+            feet_local_ext = item.get("oracle_feet_local")
             if self.lookahead_len > 0:
                 if "oracle_feat_look" not in item:
                     raise ValueError(
@@ -1118,7 +1242,11 @@ class MaskedFlowDataset(Dataset):
                 oracle_feat_ext = torch.cat(
                     [oracle_feat_ext, item["oracle_feat_look"]], dim=0
                 )
-            oracle_ext = self._oracle_features(oracle_feat_ext)
+                if feet_local_ext is not None:
+                    feet_local_ext = torch.cat(
+                        [feet_local_ext, item["oracle_feet_local_look"]], dim=0
+                    )
+            oracle_ext = self._oracle_features(oracle_feat_ext, feet_local_ext)
         oracle = None if oracle_ext is None else oracle_ext[:T]
         s_ee = self._build_s_ee(item, oracle)
         s_ee_prim = self._build_s_ee_primitive_windows(item, prim_cfg, oracle)
@@ -1131,6 +1259,10 @@ class MaskedFlowDataset(Dataset):
             "s_full_prim": torch.stack(s_full_prim, dim=0),
             "s_ee_prim": s_ee_prim,
         }
+        # Cached FK poses are an intermediate input like the raw lookahead
+        # keypoints below; drop them so default_collate sees a stable schema.
+        result.pop("oracle_feet_local", None)
+        result.pop("oracle_feet_local_look", None)
         if self.lookahead_len > 0:
             look_prim, look_valid = self._build_lookahead_prim_windows(
                 item, prim_cfg, oracle_ext

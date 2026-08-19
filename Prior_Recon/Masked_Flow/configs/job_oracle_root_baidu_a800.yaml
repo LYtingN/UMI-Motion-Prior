@@ -1,0 +1,44 @@
+config_version: 1
+cluster: baidu_a800
+num_gpus: 8
+image: "ai-base:ubuntu22.04-sim5.0.0-lab_MD2.2.1-ray2.52.0-cu12.8_devel-v1.4"
+
+git_workspace:
+  token: GH_PAT
+  repos:
+    - repo_url: https://github.com/LYtingN/UMI-Motion-Prior.git
+      commit_sha: d178ce71c622ca176aba73b9512bda14c079a4d1
+
+pip_packages:
+  - pyyaml          # configs/load_config.py: config_from_yaml
+  - numpy
+  - pandas          # dataset/delta_dataset.py 懒加载 (LeRobot/CSV 路径才用)
+  - tensorboard     # trainer 里 SummaryWriter 日志(否则静默跳过)
+pip_directories: []
+py_modules: []
+py_paths: ["."]
+log_folder: "logs"
+
+tasks:
+  - name: masked_flow_oracle_root
+    type: torch_trainer.train
+    run_name: masked_flow_oracle_root_baidu_a800
+    entry_module: Prior_Recon/Masked_Flow/scripts/train_delta_flow.py
+    args:
+      # 路径相对 cwd(=仓库根)解析
+      - "--config"
+      - "Prior_Recon/Masked_Flow/configs/sim_config/oracle_root.yaml"
+      # cfg.train.batch_size=8192 是全局 batch,按 rank 均分:8192 / 16 = 512,
+      # 整除所以不需要 --batch-size 覆盖(换 GPU 数时先确认能整除)。
+      - "--feat-root"
+      - "/data/nas_ray/home/eason.er/delta_feat_v4"
+      - "--gpu-memory-fraction"
+      - "0.9"
+      # ckpt 落 NAS 持久化(不落 pod 内易失的仓库根);传 --ckpt-dir 则跳过日期后缀
+      - "--ckpt-dir"
+      - "/data/nas_ray/home/eason.er/checkpoints/Prior_Recon/masked_flow_delta73_oracle_root_0819"
+
+os_env_vars:
+  GH_PAT: "REPLACE_WITH_GITHUB_PAT"
+  WANDB_MODE: "offline"
+  FEAT_CACHE_MAX_FILES: "100000"

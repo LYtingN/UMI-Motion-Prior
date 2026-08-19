@@ -1,0 +1,45 @@
+config_version: 1
+cluster: baidu_a800
+num_gpus: 16
+image: "ai-base:ubuntu22.04-sim5.0.0-lab_MD2.2.1-ray2.52.0-cu12.8_devel-v1.4"
+
+git_workspace:
+  token: GH_PAT
+  repos:
+    - repo_url: https://github.com/LYtingN/UMI-Motion-Prior.git
+      # 钉死完整 SHA,不要用 main:集群 agent 复用一个共享裸镜像,commit_sha
+      # 是分支名时会先用镜像里的本地 refs/heads/main 解析(fetch 失败只打 warning),
+      # 镜像陈旧就会静默 checkout 旧代码。用完整 SHA 时镜像里没有该对象会强制 fetch,
+      # 拿不到就直接报错,不会跑到错误的代码上。
+      commit_sha: d178ce71c622ca176aba73b9512bda14c079a4d1
+
+pip_packages:
+  - pyyaml          # configs/load_config.py: config_from_yaml
+  - numpy
+  - pandas          # dataset/delta_dataset.py 懒加载 (LeRobot/CSV 路径才用)
+  - tensorboard     # trainer 里 SummaryWriter 日志(否则静默跳过)
+pip_directories: []
+py_modules: []
+py_paths: ["."]
+log_folder: "logs"
+
+tasks:
+  - name: masked_flow_wo_lookahead
+    type: torch_trainer.train
+    run_name: masked_flow_wo_lookahead_baidu_a800
+    entry_module: Prior_Recon/Masked_Flow/scripts/train_delta_flow.py
+    args:
+      # 路径相对 cwd(=仓库根)解析
+      - "--config"
+      - "Prior_Recon/Masked_Flow/configs/sim_config/lookahead0.yaml"
+      - "--feat-root"
+      - "/data/nas_ray/home/eason.er/delta_feat_v4"
+      - "--gpu-memory-fraction"
+      - "0.9"
+      - "--ckpt-dir"
+      - "/data/nas_ray/home/eason.er/checkpoints/Prior_Recon/masked_flow_delta73_without_lookahead_0817"
+
+os_env_vars:
+  GH_PAT: "REPLACE_WITH_GITHUB_PAT"
+  WANDB_MODE: "offline"
+  FEAT_CACHE_MAX_FILES: "100000"
